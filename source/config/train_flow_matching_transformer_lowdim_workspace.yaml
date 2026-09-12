@@ -1,0 +1,151 @@
+defaults:
+  - _self_
+  - task: pusht/pusht_lowdim
+
+name: train_flow_matching_transformer_lowdim
+_target_: source.workspace.train_flow_matching_transformer_lowdim_workspace.TrainFlowMatchingTransformerLowdimWorkspace
+
+obs_dim: ${task.obs_dim}
+action_dim: ${task.action_dim}
+task_name: ${task.name}
+exp_name: "default"
+
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+n_latency_steps: 0
+num_inference_steps: 10
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_cond: True
+pred_action_steps_only: False
+
+use_rtc: True
+rtc_beta: 5.0
+
+policy:
+  _target_: source.policy.flow_matching_transformer_lowdim_policy.FlowMatchingTransformerLowdimPolicy
+
+  model:
+    _target_: source.model.diffusion.transformer_for_diffusion.TransformerForDiffusion
+    input_dim: ${eval:'${action_dim} if ${obs_as_cond} else ${obs_dim} + ${action_dim}'}
+    output_dim: ${policy.model.input_dim}
+    horizon: ${horizon}
+    n_obs_steps: ${n_obs_steps}
+    cond_dim: ${eval:'${obs_dim} if ${obs_as_cond} else 0'}
+
+    n_layer: 8
+    n_head: 4
+    n_emb: 256
+    p_drop_emb: 0.0
+    p_drop_attn: 0.3
+
+    causal_attn: True
+    time_as_cond: True # if false, use BERT like encoder only arch, time as input
+    obs_as_cond: ${obs_as_cond}
+    n_cond_layers: 0 # >0: use transformer encoder for cond, otherwise use MLP
+
+  num_inference_steps: ${num_inference_steps}
+
+  horizon: ${horizon}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  obs_as_cond: ${obs_as_cond}
+  pred_action_steps_only: ${pred_action_steps_only}
+
+  use_rtc: ${use_rtc}
+  rtc_beta: ${rtc_beta}
+  # scheduler.step params
+  # predict_epsilon: True
+
+ema:
+  _target_: source.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 256
+  num_workers: 4
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 256
+  num_workers: 1
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+optimizer:
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.95]
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: True
+  resume_run_dir_path: null  # To resume training from previous run we would override this from command line, e.g. "python train.py --config-name train_diffusion_transformer_image_workspace training.resume_run_dir_path *path_to_run_directory_we_resume_from*"
+  # optimization
+  lr_scheduler: cosine
+  # Transformer needs LR warmup
+  lr_warmup_steps: 1000
+  num_epochs: 501
+  gradient_accumulate_every: 1
+  use_ema: True
+  # training loop control
+  # in epochs
+  rollout_every: 50
+  last_n_rollout_every:
+    interval: ${training.rollout_every}
+    n: 100
+  checkpoint_every: 50
+  val_every: 25
+  sample_every: 25
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: adaptive_mean_flow
+  resume: True
+  mode: offline
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 0
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
+
+inference_sweep:
+  perform_inference_sweep: False
+  sweep_param_dict: {}

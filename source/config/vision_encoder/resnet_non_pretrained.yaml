@@ -1,0 +1,22 @@
+name: resnet_non_pretrained
+frozen: False
+pretrained: False
+
+obs_encoder:
+  _target_: source.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+  shape_meta: ${task.shape_meta}
+  rgb_model:
+    _target_: source.model.vision.model_getter.get_resnet
+    name: resnet18
+    weights: null #mcr, IMAGENET1K_V2
+  resize_shape: null
+  crop_shape: ${task.crop_shape}
+  frozen: ${vision_encoder.frozen}
+  random_crop: True
+  eval_fixed_crop: True
+  use_group_norm: True
+  use_spatial_softmax: True
+  n_spatial_softmax_keypoints: 32
+  share_rgb_model: False
+  imagenet_norm: False
+  freeze_batchnorm: False

@@ -1,0 +1,35 @@
+task: pick-out-of-hole
+name: ${task.task}_lowdim
+
+obs_dim: 21 # 9*2 keypoints + 2 state
+action_dim: 4
+
+env_runner:
+  _target_: source.env_runner.metaworld_lowdim_runner.MetaworldLowdimRunner
+  task: ${task.task}
+  n_train: 0
+  n_train_vis: 0
+  train_start_seed: 0
+  n_test: 50
+  n_test_vis: 0
+  test_start_seed: 100000
+  max_steps: 300
+  action_noise_magnitude: 0.0
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  n_latency_steps: ${n_latency_steps}
+  fps: 10
+  past_action: ${past_action_visible}
+  n_envs: 50
+  save_trajectories: False
+  trajectory_dir: trajectories
+
+dataset:
+  _target_: source.dataset.metaworld_lowdim_dataset.MetaworldLowdimDataset
+  task: ${task.task}
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: 100

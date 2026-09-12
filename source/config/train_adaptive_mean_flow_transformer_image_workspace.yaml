@@ -1,0 +1,158 @@
+defaults:
+  - _self_
+  - task: pusht/pusht_image
+  - vision_encoder: resnet_non_pretrained
+
+name: adaptive_mean_flow_transformer_image
+_target_: source.workspace.train_mean_flow_transformer_image_workspace.TrainMeanFlowTransformerImageWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "default"
+
+
+horizon: 20
+n_obs_steps: 10
+n_action_steps: 1
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+flow_ratio: 0.50
+flow_matching_inference: False
+
+time_cond: AdaLNZero
+
+t_start: 0.5
+t_end: 1.0
+p_curve: 0.25
+
+monotone_schedule_ratio: 0.5
+
+freeze_obs_encoder: False
+
+policy:
+  _target_: source.policy.adaptive_mean_flow_transformer_image_policy.AdaptiveMeanFlowTransformerImagePolicy
+
+  shape_meta: ${shape_meta}
+
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 1
+  flow_ratio: ${flow_ratio}
+  flow_matching_inference: ${flow_matching_inference}
+
+  t_start: ${t_start}
+  t_end: ${t_end}
+  p_curve: ${p_curve}
+  monotone_schedule_ratio: ${monotone_schedule_ratio}
+
+  obs_encoder: ${vision_encoder.obs_encoder}
+  freeze_obs_encoder: ${freeze_obs_encoder}
+
+  n_layer: 8
+  n_cond_layers: 0  # >0: use transformer encoder for cond, otherwise use MLP
+  n_head: 4
+  n_emb: 256
+  p_drop_emb: 0.0
+  p_drop_attn: 0.2
+  causal_attn: True
+
+  time_cond: ${time_cond}
+
+ema:
+  _target_: source.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 256
+  num_workers: 4
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 256
+  num_workers: 1
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+optimizer:
+  transformer_weight_decay: 1.0e-3
+  obs_encoder_weight_decay: 1.0e-6
+  learning_rate: 1.0e-4
+  betas: [0.9, 0.95]
+
+inference_sweep:
+  perform_inference_sweep: False
+  sweep_param_dict: &sweep_param_dict
+    policy:
+      t_start: [0.2,0.3,0.5, 0.7, 1.0]
+      p_curve: [0.1,0.35,1.5]
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: True
+  # optimization
+  lr_scheduler: cosine
+  # Transformer needs LR warmup
+  lr_warmup_steps: 1000
+  num_epochs: 501
+  gradient_accumulate_every: 1
+  # EMA destroys performance when used with BatchNorm
+  # replace BatchNorm with GroupNorm.
+  use_ema: True
+  # training loop control
+  # in epochs
+  rollout_every: 50
+  last_n_rollout_every:
+    interval: ${training.rollout_every}
+    n: 100
+  checkpoint_every: 50
+  val_every: 25
+  sample_every: 25
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: adaptive_mean_flow
+  resume: True
+  mode: offline
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: epoch
+    mode: max
+    k: 0
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+parent_dir: adaptive_mean_flow
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
