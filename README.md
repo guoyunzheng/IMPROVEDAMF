@@ -59,4 +59,4 @@ Evaluation uses the task, action horizon, and episode counts saved in the checkp
 
 ## Acknowledgments
 
-Based on Diffusion Policy and TEDi Policy. Original copyright and license notices are retained in `LICENSE` and source files.
+The code is based on [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) and [Streaming Diffusion Policy](https://github.com/Streaming-Diffusion-Policy/streaming_diffusion_policy). Original copyright and license notices are retained in `LICENSE` and source files.
