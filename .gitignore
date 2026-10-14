@@ -1,11 +1,66 @@
+# Local documentation (keep the upstream README on this computer).
+/README*
+
+# Python environments, build products, and caches.
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+/.venv/
+/venv/
+/env/
+/build/
+/dist/
+/.cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Datasets, generated demonstrations, and model checkpoints.
 data/
-wandb/
-outputs/
+/datasets/
+/demos/
+checkpoints/
 *.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
 *.pkl
+*.zarr/
+*.h5
+*.hdf5
+
+# Training outputs and experiment tracking.
+outputs/
+/results/
+runs/
+logs/
+wandb/
+tensorboard/
+lightning_logs/
+.hydra/
+events.out.tfevents.*
+*.log
+
+# Local credentials and machine-specific settings.
 .env
+.env.*
+!.env.example
+!.env.template
+.netrc
+.pypirc
+/local_config/
+
+# Editor and operating-system files.
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
