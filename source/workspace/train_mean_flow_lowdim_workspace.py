@@ -18,6 +18,7 @@ from source.dataset.base_dataset import BaseLowdimDataset
 from source.env_runner.base_lowdim_runner import BaseLowdimRunner
 from source.common.checkpoint_util import TopKCheckpointManager
 from source.common.json_logger import JsonLogger
+from source.common.mean_flow_schedule import scheduled_flow_ratio
 from source.common.pytorch_util import dict_apply, optimizer_to
 from source.model.diffusion.ema_model import EMAModel
 from source.model.common.lr_scheduler import get_scheduler
@@ -157,7 +158,14 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
+            for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
+                # Use the restored absolute epoch, also for validation and EMA.
+                flow_ratio = scheduled_flow_ratio(
+                    self.epoch, cfg.training.num_epochs, cfg.policy.flow_ratio,
+                    cfg.training.get('flow_ratio_schedule'))
+                self.model.flow_ratio = flow_ratio
+                if self.ema_model is not None:
+                    self.ema_model.flow_ratio = flow_ratio
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
@@ -196,6 +204,8 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
                             'train_loss': raw_loss_cpu,
                             'global_step': self.global_step,
                             'epoch': self.epoch,
+                            'fm_ratio': flow_ratio,
+                            'mf_ratio': 1.0 - flow_ratio,
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
 

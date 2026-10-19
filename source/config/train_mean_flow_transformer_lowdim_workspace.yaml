@@ -18,7 +18,8 @@ n_latency_steps: 0
 dataset_obs_steps: ${n_obs_steps}
 past_action_visible: False
 keypoint_visible_rate: 1.0
-flow_ratio: 0.50
+# FM sample fraction after the pure-FM phase (the remaining 80% use MF).
+flow_ratio: 0.20
 flow_matching_inference: False
 use_warm_start: False
 warm_start_t: 0.5
@@ -87,6 +88,9 @@ training:
   seed: 42
   debug: False
   resume: True
+  flow_ratio_schedule:
+    enabled: True
+    fm_only_fraction: 0.8
   # optimization
   lr_scheduler: cosine
   # Transformer needs LR warmup

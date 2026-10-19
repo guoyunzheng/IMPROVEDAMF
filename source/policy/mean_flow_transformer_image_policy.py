@@ -320,13 +320,18 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
         cond = nobs_features.reshape(batch_size, To, -1)
 
         model_partial = partial(self.model, cond=cond)
-        jvp_args = (
-            lambda z,t,r: model_partial(z, t, r),
-            (z, t, r),
-            (v, torch.ones_like(t), torch.zeros_like(r))
-        )
-        u, dudt = torch.autograd.functional.jvp(*jvp_args, create_graph=True)
-        u_tgt = v - (t_ - r_)*dudt
+        if self.flow_ratio == 1.0:
+            # With r=t the target is v; no Mean Flow derivative is needed.
+            u = model_partial(z, t, r)
+            u_tgt = v
+        else:
+            jvp_args = (
+                lambda z,t,r: model_partial(z, t, r),
+                (z, t, r),
+                (v, torch.ones_like(t), torch.zeros_like(r))
+            )
+            u, dudt = torch.autograd.functional.jvp(*jvp_args, create_graph=True)
+            u_tgt = v - (t_ - r_)*dudt
         error = u - u_tgt.detach()
 
 

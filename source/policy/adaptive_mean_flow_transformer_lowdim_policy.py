@@ -333,13 +333,18 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         # Approximated marginal velocity for jvp input
         #v_pred = self.model(z, t, t, cond=cond)
 
-        jvp_args = (
-            lambda z,t,r: self.model_call(z, t, r, cond),
-            (z, t, r),
-            (v, torch.ones_like(t), torch.zeros_like(r))
-        )
-        u, dudt = torch.autograd.functional.jvp(*jvp_args, create_graph=True)
-        u_tgt = v - (t_ - r_)*dudt
+        if self.flow_ratio == 1.0:
+            # With r=t the target is v; no Mean Flow derivative is needed.
+            u = self.model_call(z, t, r, cond)
+            u_tgt = v
+        else:
+            jvp_args = (
+                lambda z,t,r: self.model_call(z, t, r, cond),
+                (z, t, r),
+                (v, torch.ones_like(t), torch.zeros_like(r))
+            )
+            u, dudt = torch.autograd.functional.jvp(*jvp_args, create_graph=True)
+            u_tgt = v - (t_ - r_)*dudt
         error = u - u_tgt.detach()
 
 
