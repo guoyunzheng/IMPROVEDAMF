@@ -1,0 +1,13 @@
+{
+  "tasks": ["reach", "push", "pick-place", "drawer-open"],
+  "seeds": [42],
+  "gpus": ["0"],
+  "jobs_per_gpu": 2,
+  "config_name": "train_adaptive_mean_flow_transformer_lowdim_workspace",
+  "num_epochs": 501,
+  "num_demos": 100,
+  "generate_missing_demos": true,
+  "cpu_threads_per_job": 1,
+  "checkpoint_top_k": 3,
+  "output_root": "data/outputs/metaworld_batch"
+}

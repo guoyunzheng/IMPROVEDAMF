@@ -21,7 +21,16 @@ def normalize_task(task):
 
 
 def get_policy(task):
-    base = normalize_task(task).replace("-", "_")
+    task = normalize_task(task)
+    # Environment names do not always match expert module/class names, e.g.
+    # peg-insert-side uses SawyerPegInsertionSideV3Policy in the pinned release.
+    policies = importlib.import_module("metaworld.policies")
+    policy_cls = getattr(policies, "ENV_POLICY_MAP", {}).get(f"{task}-v3")
+    if policy_cls is not None:
+        return policy_cls()
+
+    # Preserve explicit --policy-name aliases such as peg-insertion-side.
+    base = task.replace("-", "_")
     module = importlib.import_module(f"metaworld.policies.sawyer_{base}_v3_policy")
     class_name = "Sawyer" + "".join(part.capitalize() for part in base.split("_")) + "V3Policy"
     return getattr(module, class_name)()

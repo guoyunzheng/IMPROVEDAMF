@@ -1,4 +1,6 @@
-name: amf_base
+# Create: CONDA_CHANNEL_PRIORITY=flexible conda env create -f env_specs/conda_environment_base.yaml
+# After activation, run: bash scripts/repair_itt_runtime.sh
+name: amf
 channels:
   - pytorch
   - nvidia
@@ -8,7 +10,7 @@ dependencies:
   - pip=22.2.2
   - pytorch=2.5.1
   - pytorch-cuda=12.4
-  - torchvision=0.20
+  - torchvision=0.20.1
   - numpy=1.23.3
   - numba==0.56.4
   - scipy==1.9.1
@@ -44,6 +46,8 @@ dependencies:
   - cmake=3.24.3
   # trick to avoid cpu affinity issue described in https://github.com/pytorch/pytorch/issues/99625
   - llvm-openmp=14
+  # Link its static library with scripts/repair_itt_runtime.sh when needed.
+  - ittapi-static=3.28.0
   # trick to force reinstall imagecodecs via pip
   - imagecodecs==2022.8.8
   - pip:
@@ -51,3 +55,8 @@ dependencies:
     # pip package required for jpeg-xl
     - imagecodecs==2022.9.26
     - numpy==1.23.3
+    # Compatibility fixes verified during the Ubuntu 20.04 server deployment.
+    - sympy==1.13.1
+    - mpmath==1.3.0
+    - multiprocess==0.70.13
+    - setuptools==80.9.0
