@@ -11,6 +11,7 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
@@ -52,6 +53,46 @@ class BatchTests(unittest.TestCase):
         self.assertIn("drawer-open", stream.getvalue())
         self.assertNotIn("pick-out-of-hole", stream.getvalue())
 
+    def test_epoch_cli_overrides_reach_training_and_preserve_fresh_outputs(self):
+        output = self.root / "epoch-control-dry-run"
+        path = self.config_file(output_root=str(output), num_epochs=501, mf_epochs=100, flow_ratio=0.5)
+        stream = io.StringIO()
+        with patch.object(batch.subprocess, "Popen") as spawn, contextlib.redirect_stdout(stream):
+            self.assertEqual(batch.main([
+                "--config", str(path), "--tasks", "sweep", "--seeds", "43",
+                "--num-epochs", "800", "--mf-epochs", "400", "--flow-ratio", "0.2", "--dry-run",
+            ]), 0)
+        spawn.assert_not_called()
+        self.assertFalse(output.exists())
+        text = stream.getvalue()
+        for expected in ("pure FM=400, mixed FM/MF=400", "final epoch index=799",
+                         "training.num_epochs=800", "training.resume=false",
+                         "training.flow_ratio_schedule.enabled=true",
+                         "++training.flow_ratio_schedule.fm_only_epochs=400", "flow_ratio=0.2"):
+            self.assertIn(expected, text)
+
+    def test_phase_json_settings_and_total_epoch_cli_override(self):
+        path = self.config_file(num_epochs=501, mf_epochs=400, flow_ratio=0.2)
+        cfg = batch.load_config(path, SimpleNamespace(num_epochs=801))
+        command = batch.build_train_command(cfg, {"task": "sweep", "seed": 43, "output_dir": self.root})
+        self.assertIn("training.num_epochs=801", command)
+        self.assertIn("++training.flow_ratio_schedule.fm_only_epochs=401", command)
+
+    def test_invalid_epoch_controls_rejected_before_launch(self):
+        for changes in ({"num_epochs": 0}, {"mf_epochs": -1}, {"mf_epochs": 502},
+                        {"mf_epochs": True}, {"mf_epochs": 400.5}, {"flow_ratio": True},
+                        {"flow_ratio": -0.1}, {"flow_ratio": 1.1}, {"flow_ratio": float("nan")},
+                        {"mf_epochs": 100, "config_name": "train_flow_matching_transformer_lowdim_workspace"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                batch.load_config(self.config_file(**changes))
+
+    def test_existing_configs_keep_yaml_phase_settings(self):
+        for path in (batch.REPO_ROOT / "batch_configs").glob("*.json"):
+            with self.subTest(path=path):
+                cfg = batch.load_config(path)
+                command = batch.build_train_command(cfg, {"task": cfg["tasks"][0], "seed": 42, "output_dir": self.root})
+                self.assertFalse(any("flow_ratio" in part for part in command))
+
     def test_separate_outputs_gpu_remapping_and_checkpoint_selection(self):
         cfg = {**self.cfg, "seeds": [0, 42]}
         runner = batch.BatchRunner(cfg, self.root / "batch with spaces")
@@ -87,6 +128,25 @@ class BatchTests(unittest.TestCase):
         self.assertAlmostEqual(result["last3_mean_score"], (0.9 + 0.6 + 0.54) / 3)
         self.assertEqual(result["last_epoch"], 151)
         self.assertEqual(result["val_loss"], 0.08)
+
+    def test_last3_uses_780_790_800_and_counts_each_epoch_once(self):
+        path = self.root / "logs.json.txt"
+        rows = [
+            {"epoch": 700, "test/mean_score": 1.0},
+            {"epoch": 750, "test/mean_score": 0.1},
+            {"epoch": 780, "test/mean_score": 0.6},
+            {"epoch": 790, "test/mean_score": 0.7},
+            {"epoch": 790, "test/mean_score": 0.8},
+            {"epoch": 799, "train_loss": 0.2},
+            {"epoch": 800, "test/mean_score": 0.9},
+        ]
+        path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+        result = batch.read_metrics(path)
+        self.assertEqual(result["last_epoch"], 800)
+        self.assertEqual(result["last_score"], 0.9)
+        self.assertAlmostEqual(result["last3_mean_score"], (0.6 + 0.8 + 0.9) / 3)
+        self.assertEqual(result["best_score"], 1.0)
+        self.assertEqual(result["best_epoch"], 700)
 
     def fake_dataset(self, complete=True, ends=(10, 20)):
         root = {

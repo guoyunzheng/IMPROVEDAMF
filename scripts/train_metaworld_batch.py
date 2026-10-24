@@ -4,6 +4,7 @@ Run from the repository root, in the amf environment:
     python scripts/train_metaworld_batch.py --dry-run
     python scripts/train_metaworld_batch.py
     python scripts/train_metaworld_batch.py --tasks reach push --jobs-per-gpu 1
+    python scripts/train_metaworld_batch.py --num-epochs 800 --mf-epochs 400 --flow-ratio 0.2
 
 Edit batch_configs/metaworld_amf.json to choose tasks, seeds and physical GPU
 IDs. Missing demonstrations are generated sequentially before training. Existing
@@ -18,6 +19,15 @@ explicit GPU assignment and independent output directories. It retains the top
 three evaluated checkpoints by success rate, plus latest.ckpt. GPU capacity is
 configured explicitly; the launcher does not reserve memory or detect other
 users' workloads. MetaWorld still creates 50 simulation workers per training job.
+
+--num-epochs counts actual epochs (logs start at epoch 0). --mf-epochs fixes
+the length of the trailing mixed FM/MF phase; earlier epochs use pure FM.
+--flow-ratio is the FM sample fraction within that trailing phase, not its
+duration. Omit phase options to retain the training YAML's schedule.
+The AMF lowdim YAML evaluates every 10 epochs in the final 30 epochs, aligned
+to the end of training. For N total epochs, the final three evaluations follow
+N-20, N-10 and N completed epochs; their mean is last3_mean_score. Log indices
+are zero-based (779, 789, 799 for N=800).
 """
 
 import argparse
@@ -43,6 +53,11 @@ CONFIG_KEYS = {
     "num_demos", "generate_missing_demos", "cpu_threads_per_job",
     "checkpoint_top_k", "output_root",
 }
+OPTIONAL_CONFIG_KEYS = {"mf_epochs", "flow_ratio"}
+MEAN_FLOW_CONFIGS = {
+    "train_adaptive_mean_flow_transformer_lowdim_workspace",
+    "train_mean_flow_transformer_lowdim_workspace",
+}
 SUMMARY_FIELDS = [
     "task", "seed", "status", "gpu", "return_code", "last_epoch",
     "last_score", "best_score", "best_epoch", "last3_mean_score",
@@ -61,10 +76,12 @@ def interrupt_batch(signum, frame):
 def load_config(path, args=None):
     with Path(path).open(encoding="utf-8-sig") as stream:
         cfg = json.load(stream)
-    if not isinstance(cfg, dict) or set(cfg) != CONFIG_KEYS:
-        raise ValueError("Batch config must contain exactly: " + ", ".join(sorted(CONFIG_KEYS)))
+    if (not isinstance(cfg, dict) or not CONFIG_KEYS <= set(cfg)
+            or set(cfg) - CONFIG_KEYS - OPTIONAL_CONFIG_KEYS):
+        raise ValueError("Batch config requires: " + ", ".join(sorted(CONFIG_KEYS))
+                         + "; optional: " + ", ".join(sorted(OPTIONAL_CONFIG_KEYS)))
     if args is not None:
-        for key in ("tasks", "seeds", "gpus", "jobs_per_gpu"):
+        for key in ("tasks", "seeds", "gpus", "jobs_per_gpu", "num_epochs", "mf_epochs", "flow_ratio"):
             value = getattr(args, key, None)
             if value is not None:
                 cfg[key] = value
@@ -92,6 +109,14 @@ def load_config(path, args=None):
         raise ValueError("config_name must name a lowdim training config")
     if not (REPO_ROOT / "source/config" / (cfg["config_name"] + ".yaml")).is_file():
         raise ValueError(f"Unknown training config: {cfg['config_name']}")
+    mf_epochs = cfg.get("mf_epochs")
+    if mf_epochs is not None and (type(mf_epochs) is not int or not 0 <= mf_epochs <= cfg["num_epochs"]):
+        raise ValueError("mf_epochs must be an integer between 0 and num_epochs")
+    flow_ratio = cfg.get("flow_ratio")
+    if flow_ratio is not None and (type(flow_ratio) not in (int, float) or not 0 <= flow_ratio <= 1):
+        raise ValueError("flow_ratio must be a number in [0, 1] (FM sample fraction)")
+    if (mf_epochs is not None or flow_ratio is not None) and cfg["config_name"] not in MEAN_FLOW_CONFIGS:
+        raise ValueError("mf_epochs and flow_ratio require a Mean Flow lowdim training config")
     if not isinstance(cfg["output_root"], str) or not cfg["output_root"].strip():
         raise ValueError("output_root must be a nonempty path")
     return cfg
@@ -112,7 +137,7 @@ def child_environment(cfg, gpu=None):
 def build_train_command(cfg, job):
     # JSON quoting protects spaces and Hydra grammar characters in the path.
     run_dir = json.dumps(Path(job["output_dir"]).as_posix(), ensure_ascii=False)
-    return [
+    command = [
         sys.executable, "-u", str(REPO_ROOT / "train.py"),
         "--config-name=" + cfg["config_name"],
         "task=metaworld/metaworld_lowdim", "task.task=" + job["task"],
@@ -122,6 +147,14 @@ def build_train_command(cfg, job):
         "checkpoint.topk.mode=max", f"checkpoint.topk.k={cfg['checkpoint_top_k']}",
         "checkpoint.save_last_ckpt=true", "hydra.run.dir=" + run_dir,
     ]
+    if cfg.get("mf_epochs") is not None:
+        command.extend([
+            "training.flow_ratio_schedule.enabled=true",
+            f"++training.flow_ratio_schedule.fm_only_epochs={cfg['num_epochs'] - cfg['mf_epochs']}",
+        ])
+    if cfg.get("flow_ratio") is not None:
+        command.append(f"flow_ratio={cfg['flow_ratio']}")
+    return command
 
 
 def demo_command(cfg, task):
@@ -279,6 +312,9 @@ class BatchRunner:
                         job.update(status="blocked", error=str(exc))
             self.persist()
 
+    def build_command(self, job):
+        return build_train_command(self.cfg, job)
+
     def train(self):
         self.state["status"] = "training"
         pending = [job for job in self.jobs if job["status"] == "pending"]
@@ -289,7 +325,7 @@ class BatchRunner:
                     job = pending.pop(0)
                     job["gpu"] = gpu
                     try:
-                        self.start(job, build_train_command(self.cfg, job), Path(job["output_dir"]) / "console.log", gpu)
+                        self.start(job, self.build_command(job), Path(job["output_dir"]) / "console.log", gpu)
                         count += 1
                         print(f"[START] {job['task']} seed={job['seed']} GPU={gpu}; {job['output_dir']}", flush=True)
                     except OSError as exc:
@@ -343,6 +379,9 @@ def main(argv=None):
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--gpus", nargs="+", help="Physical GPU indices, e.g. --gpus 0 1")
     parser.add_argument("--jobs-per-gpu", type=int)
+    parser.add_argument("--num-epochs", type=int, help="Total actual training epochs; log indices run from 0 to N-1")
+    parser.add_argument("--mf-epochs", type=int, help="Trailing mixed FM/MF epochs; preceding epochs use pure FM")
+    parser.add_argument("--flow-ratio", type=float, help="FM sample fraction in the mixed phase (e.g. 0.2 means 20%% FM, 80%% MF)")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without importing ML packages, creating files or starting jobs")
     args = parser.parse_args(argv)
     try:
@@ -353,6 +392,12 @@ def main(argv=None):
         runner = BatchRunner(cfg, root / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
         capacity = len(cfg["gpus"]) * cfg["jobs_per_gpu"]
         print(f"Tasks: {', '.join(cfg['tasks'])}; seeds: {cfg['seeds']}\nGPUs: {cfg['gpus']}; maximum concurrent training jobs: {capacity}\nEpochs per job: {cfg['num_epochs']}; simulation workers per job: 50\nBatch directory: {runner.batch_dir}", flush=True)
+        if cfg.get("mf_epochs") is not None:
+            fm_epochs = cfg["num_epochs"] - cfg["mf_epochs"]
+            print(f"Phase lengths: pure FM={fm_epochs}, mixed FM/MF={cfg['mf_epochs']}; "
+                  f"final epoch index={cfg['num_epochs'] - 1}", flush=True)
+        if cfg.get("flow_ratio") is not None:
+            print(f"Mixed-phase samples: FM={cfg['flow_ratio']:.0%}, MF={1 - cfg['flow_ratio']:.0%}", flush=True)
         if args.dry_run:
             for task in cfg["tasks"]:
                 print("Reuse complete data, otherwise generate: " + shlex.join(demo_command(cfg, task)))

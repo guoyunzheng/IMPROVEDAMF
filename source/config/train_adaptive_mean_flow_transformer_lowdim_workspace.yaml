@@ -113,9 +113,10 @@ training:
   # training loop control
   # in epochs
   rollout_every: 50
+  # Final 30 epochs: evaluate every 10, counting backwards from the final epoch.
   last_n_rollout_every:
-    interval: ${training.rollout_every}
-    n: 100
+    interval: 10
+    n: 30
   checkpoint_every: 50
   val_every: 25
   sample_every: 25

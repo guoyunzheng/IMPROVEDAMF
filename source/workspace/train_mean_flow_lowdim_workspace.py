@@ -110,6 +110,9 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
             ema = hydra.utils.instantiate(
                 cfg.ema,
                 model=self.ema_model)
+            # EMA is updated once per training batch. Its warmup counter is
+            # not stored in legacy checkpoints; recover it from batch progress.
+            ema.optimization_step = self.global_step
 
         # configure env
         env_runner: BaseLowdimRunner
@@ -159,6 +162,7 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
+                is_final_epoch = self.epoch == cfg.training.num_epochs - 1
                 # Use the restored absolute epoch, also for validation and EMA.
                 flow_ratio = scheduled_flow_ratio(
                     self.epoch, cfg.training.num_epochs, cfg.policy.flow_ratio,
@@ -232,9 +236,14 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                rollout_this_epoch = False
-                if ("last_n_rollout_every" in cfg.training) and (self.epoch >= (cfg.training.num_epochs - cfg.training.last_n_rollout_every.n)):
-                    if (self.epoch % cfg.training.last_n_rollout_every.interval) == 0:
+                rollout_this_epoch = is_final_epoch
+                in_final_rollout_window = (
+                    "last_n_rollout_every" in cfg.training
+                    and self.epoch >= cfg.training.num_epochs - cfg.training.last_n_rollout_every.n)
+                if in_final_rollout_window:
+                    # Align to the end, including totals not divisible by 10.
+                    epochs_until_end = cfg.training.num_epochs - 1 - self.epoch
+                    if (epochs_until_end % cfg.training.last_n_rollout_every.interval) == 0:
                         rollout_this_epoch = True
 
                 elif (self.epoch % cfg.training.rollout_every) == 0:
@@ -252,7 +261,7 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
                     step_log.update(runner_log)
 
                 # run validation
-                if (self.epoch % cfg.training.val_every) == 0:
+                if (self.epoch % cfg.training.val_every) == 0 or is_final_epoch:
                     with torch.no_grad():
                         val_losses = list()
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
@@ -291,7 +300,9 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
                         del mse
 
                 # checkpoint
-                if ((self.epoch % cfg.training.checkpoint_every) == 0) and rollout_this_epoch:
+                # Keep densely evaluated final checkpoints eligible for top-k,
+                # including the last three evaluations between regular saves.
+                if ((self.epoch % cfg.training.checkpoint_every) == 0 or is_final_epoch or in_final_rollout_window) and rollout_this_epoch:
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()
