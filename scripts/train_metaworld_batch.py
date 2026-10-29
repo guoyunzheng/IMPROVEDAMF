@@ -24,6 +24,14 @@ users' workloads. MetaWorld still creates 50 simulation workers per training job
 the length of the trailing mixed FM/MF phase; earlier epochs use pure FM.
 --flow-ratio is the FM sample fraction within that trailing phase, not its
 duration. Omit phase options to retain the training YAML's schedule.
+--gap-weighting progressive enables trajectory-level MF interval weighting:
+beta = q**k + (1-q**k)*lambda*(1-mean(t-r)). q advances only over mixed-phase
+training batches; FM keeps weight 1. --gap-k controls how long small intervals
+are preferred; lambda is calibrated once unless --gap-lambda is supplied.
+Use --gap-weighting off for the baseline, or constant_small_gap for q=0.
+This feature currently supports AMF lowdim only. It changes loss weights, not
+the sampled interval limits, FM/MF sample ratio, model or inference procedure.
+Resolved calibration is saved in progressive_gap_config.yaml and checkpoints.
 The AMF lowdim YAML evaluates every 10 epochs in the final 30 epochs, aligned
 to the end of training. For N total epochs, the final three evaluations follow
 N-20, N-10 and N completed epochs; their mean is last3_mean_score. Log indices
@@ -53,7 +61,8 @@ CONFIG_KEYS = {
     "num_demos", "generate_missing_demos", "cpu_threads_per_job",
     "checkpoint_top_k", "output_root",
 }
-OPTIONAL_CONFIG_KEYS = {"mf_epochs", "flow_ratio"}
+GAP_CONFIG_KEYS = {"gap_weighting", "gap_k", "gap_lambda", "gap_calibration_batches", "gap_calibration_seed"}
+OPTIONAL_CONFIG_KEYS = {"mf_epochs", "flow_ratio"} | GAP_CONFIG_KEYS
 MEAN_FLOW_CONFIGS = {
     "train_adaptive_mean_flow_transformer_lowdim_workspace",
     "train_mean_flow_transformer_lowdim_workspace",
@@ -81,7 +90,7 @@ def load_config(path, args=None):
         raise ValueError("Batch config requires: " + ", ".join(sorted(CONFIG_KEYS))
                          + "; optional: " + ", ".join(sorted(OPTIONAL_CONFIG_KEYS)))
     if args is not None:
-        for key in ("tasks", "seeds", "gpus", "jobs_per_gpu", "num_epochs", "mf_epochs", "flow_ratio"):
+        for key in ("tasks", "seeds", "gpus", "jobs_per_gpu", "num_epochs", "mf_epochs", "flow_ratio", *sorted(GAP_CONFIG_KEYS)):
             value = getattr(args, key, None)
             if value is not None:
                 cfg[key] = value
@@ -117,6 +126,21 @@ def load_config(path, args=None):
         raise ValueError("flow_ratio must be a number in [0, 1] (FM sample fraction)")
     if (mf_epochs is not None or flow_ratio is not None) and cfg["config_name"] not in MEAN_FLOW_CONFIGS:
         raise ValueError("mf_epochs and flow_ratio require a Mean Flow lowdim training config")
+    if GAP_CONFIG_KEYS & cfg.keys():
+        if cfg["config_name"] != "train_adaptive_mean_flow_transformer_lowdim_workspace":
+            raise ValueError("Gap weighting currently requires AMF lowdim")
+        if cfg.get("gap_weighting", "off") not in ("off", "progressive", "constant_small_gap"):
+            raise ValueError("gap_weighting must be off, progressive or constant_small_gap")
+        if GAP_CONFIG_KEYS.intersection(cfg) - {"gap_weighting"} and cfg.get("gap_weighting", "off") == "off":
+            raise ValueError("Set gap_weighting before specifying its parameters")
+        for key in ("gap_k", "gap_lambda"):
+            if key in cfg and (type(cfg[key]) not in (int, float) or not math.isfinite(cfg[key]) or cfg[key] <= 0):
+                raise ValueError(f"{key} must be finite and positive")
+        for key, minimum in (("gap_calibration_batches", 1), ("gap_calibration_seed", 0)):
+            if key in cfg and (type(cfg[key]) is not int or cfg[key] < minimum):
+                raise ValueError(f"Invalid {key}")
+        if cfg.get("gap_calibration_seed", 0) >= 2**32:
+            raise ValueError("gap_calibration_seed must be below 2**32")
     if not isinstance(cfg["output_root"], str) or not cfg["output_root"].strip():
         raise ValueError("output_root must be a nonempty path")
     return cfg
@@ -154,6 +178,17 @@ def build_train_command(cfg, job):
         ])
     if cfg.get("flow_ratio") is not None:
         command.append(f"flow_ratio={cfg['flow_ratio']}")
+    prefix = "training.progressive_gap_weighting."
+    if "gap_weighting" in cfg:
+        mode = cfg["gap_weighting"]
+        command.append(prefix + "enabled=" + str(mode != "off").lower())
+        if mode != "off":
+            command.append(prefix + "mode=" + mode)
+    for key, field in (("gap_k", "k"), ("gap_lambda", "lambda_value"),
+                       ("gap_calibration_batches", "calibration_batches"),
+                       ("gap_calibration_seed", "calibration_seed")):
+        if key in cfg:
+            command.append(f"{prefix}{field}={cfg[key]}")
     return command
 
 
@@ -382,6 +417,12 @@ def main(argv=None):
     parser.add_argument("--num-epochs", type=int, help="Total actual training epochs; log indices run from 0 to N-1")
     parser.add_argument("--mf-epochs", type=int, help="Trailing mixed FM/MF epochs; preceding epochs use pure FM")
     parser.add_argument("--flow-ratio", type=float, help="FM sample fraction in the mixed phase (e.g. 0.2 means 20%% FM, 80%% MF)")
+    parser.add_argument("--gap-weighting", choices=("off", "progressive", "constant_small_gap"),
+                        help="AMF lowdim MF interval weighting; omitted preserves the YAML default (off)")
+    parser.add_argument("--gap-k", type=float, help="Progress exponent; >1 retains small-gap preference longer")
+    parser.add_argument("--gap-lambda", type=float, help="Fixed calibrated lambda; omit to estimate from this run's sampler")
+    parser.add_argument("--gap-calibration-batches", type=int)
+    parser.add_argument("--gap-calibration-seed", type=int)
     parser.add_argument("--dry-run", action="store_true", help="Print commands without importing ML packages, creating files or starting jobs")
     args = parser.parse_args(argv)
     try:
@@ -398,6 +439,9 @@ def main(argv=None):
                   f"final epoch index={cfg['num_epochs'] - 1}", flush=True)
         if cfg.get("flow_ratio") is not None:
             print(f"Mixed-phase samples: FM={cfg['flow_ratio']:.0%}, MF={1 - cfg['flow_ratio']:.0%}", flush=True)
+        if "gap_weighting" in cfg:
+            print(f"MF gap weighting: {cfg['gap_weighting']}; k={cfg.get('gap_k', 1.0)}; "
+                  f"lambda={cfg.get('gap_lambda', 'calibrate once')}", flush=True)
         if args.dry_run:
             for task in cfg["tasks"]:
                 print("Reuse complete data, otherwise generate: " + shlex.join(demo_command(cfg, task)))

@@ -101,6 +101,17 @@ training:
   flow_ratio_schedule:
     enabled: True
     fm_only_fraction: 0.8
+  # Optional trajectory-level curriculum; sampling and inference are unchanged.
+  progressive_gap_weighting:
+    enabled: False
+    mode: progressive  # progressive / constant_small_gap
+    start_at: joint_finetune
+    aggregation: trajectory_mean
+    k: 1.0
+    lambda_value: null  # Calibrate once using this run's MF sampler.
+    calibration_batches: 64
+    calibration_seed: 0
+    validation_seed: 0
   # optimization
   lr_scheduler: cosine
   # Transformer needs LR warmup

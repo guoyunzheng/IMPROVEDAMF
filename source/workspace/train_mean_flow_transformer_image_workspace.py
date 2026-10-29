@@ -31,6 +31,8 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
+        if cfg.training.get('progressive_gap_weighting', {}).get('enabled', False):
+            raise ValueError("Progressive gap weighting currently supports AMF lowdim only")
 
         # set seed
         seed = cfg.training.seed

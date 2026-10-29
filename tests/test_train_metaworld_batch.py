@@ -78,6 +78,39 @@ class BatchTests(unittest.TestCase):
         self.assertIn("training.num_epochs=801", command)
         self.assertIn("++training.flow_ratio_schedule.fm_only_epochs=401", command)
 
+    def test_gap_cli_options_and_ablation_modes_reach_training(self):
+        for mode in ('progressive', 'constant_small_gap', 'off'):
+            stream = io.StringIO()
+            argv = ['--gap-weighting', mode, '--num-epochs', '800', '--mf-epochs', '400', '--dry-run']
+            if mode != 'off':
+                argv += ['--gap-k', '2', '--gap-lambda', '1.6', '--gap-calibration-batches', '32',
+                         '--gap-calibration-seed', '7']
+            with patch.object(batch.subprocess, 'Popen') as spawn, contextlib.redirect_stdout(stream):
+                self.assertEqual(batch.main(argv), 0)
+            spawn.assert_not_called()
+            text = stream.getvalue()
+            self.assertIn('training.progressive_gap_weighting.enabled=' + str(mode != 'off').lower(), text)
+            if mode != 'off':
+                for field in ('mode=' + mode, 'k=2.0', 'lambda_value=1.6', 'calibration_batches=32', 'calibration_seed=7'):
+                    self.assertIn('training.progressive_gap_weighting.' + field, text)
+
+    def test_invalid_gap_controls_fail_before_launch(self):
+        for changes in (dict(gap_weighting='typo'), dict(gap_k=1.),
+                        dict(gap_weighting='progressive', gap_k=0),
+                        dict(gap_weighting='progressive', gap_lambda=float('nan')),
+                        dict(gap_weighting='progressive', gap_calibration_batches=True),
+                        dict(gap_weighting='progressive', gap_calibration_seed=2**32),
+                        dict(gap_weighting='progressive', config_name='train_mean_flow_transformer_lowdim_workspace')):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                batch.load_config(self.config_file(**changes))
+
+    def test_gap_json_options_can_be_overridden(self):
+        path = self.config_file(gap_weighting='constant_small_gap', gap_k=2.)
+        cfg = batch.load_config(path, SimpleNamespace(gap_weighting='progressive', gap_k=1.))
+        command = batch.build_train_command(cfg, dict(task='reach', seed=42, output_dir=self.root))
+        self.assertIn('training.progressive_gap_weighting.mode=progressive', command)
+        self.assertIn('training.progressive_gap_weighting.k=1.0', command)
+
     def test_invalid_epoch_controls_rejected_before_launch(self):
         for changes in ({"num_epochs": 0}, {"mf_epochs": -1}, {"mf_epochs": 502},
                         {"mf_epochs": True}, {"mf_epochs": 400.5}, {"flow_ratio": True},

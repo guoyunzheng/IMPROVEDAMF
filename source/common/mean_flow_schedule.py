@@ -3,6 +3,23 @@
 import math
 
 
+def fm_only_epoch_count(num_epochs, schedule=None):
+    """Resolve the same warmup boundary for sampling and gap weighting."""
+    if num_epochs <= 0:
+        raise ValueError("num_epochs must be positive")
+    if schedule is None or not schedule.get("enabled", True):
+        return 0
+    count = schedule.get("fm_only_epochs")
+    if count is not None:
+        if type(count) is not int or not 0 <= count <= num_epochs:
+            raise ValueError("fm_only_epochs must be an integer between 0 and num_epochs")
+        return count
+    fraction = schedule.get("fm_only_fraction", 0.8)
+    if not 0 <= fraction <= 1:
+        raise ValueError("fm_only_fraction must lie in [0, 1]")
+    return math.ceil(num_epochs * fraction)
+
+
 def scheduled_flow_ratio(epoch, num_epochs, flow_ratio, schedule=None):
     """Return the FM sample fraction for a zero-based absolute epoch.
 
@@ -19,13 +36,5 @@ def scheduled_flow_ratio(epoch, num_epochs, flow_ratio, schedule=None):
     if schedule is None or not schedule.get("enabled", True):
         return flow_ratio
 
-    fm_only_epochs = schedule.get("fm_only_epochs")
-    if fm_only_epochs is not None:
-        if type(fm_only_epochs) is not int or not 0 <= fm_only_epochs <= num_epochs:
-            raise ValueError("fm_only_epochs must be an integer between 0 and num_epochs")
-    else:
-        fm_only_fraction = schedule.get("fm_only_fraction", 0.8)
-        if not 0 <= fm_only_fraction <= 1:
-            raise ValueError("fm_only_fraction must lie in [0, 1]")
-        fm_only_epochs = math.ceil(num_epochs * fm_only_fraction)
+    fm_only_epochs = fm_only_epoch_count(num_epochs, schedule)
     return 1.0 if epoch < fm_only_epochs else flow_ratio

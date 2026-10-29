@@ -8,6 +8,7 @@ from source.model.common.normalizer import LinearNormalizer, SingleFieldLinearNo
 from source.policy.base_lowdim_policy import BaseLowdimPolicy
 from source.model.mean_flow.transformer_for_adaptive_mean_flow import TransformerForAdaptiveMeanFlow
 from source.model.diffusion.mask_generator import LowdimMaskGenerator
+from source.common.progressive_gap import gap_loss
 
 def adaptive_l2_loss(error, gamma=0.5, c=1e-3):
     """
@@ -109,7 +110,7 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         return self.model(trajectory, t, r, cond)
 
 
-    def sample_t_r(self, batch_size, device):
+    def sample_t_r(self, batch_size, device, return_mask=False):
 
         T = self.horizon
         To = self.n_obs_steps
@@ -158,6 +159,11 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
 
         t = torch.tensor(t_np, device=device)
         r = torch.tensor(r_np, device=device)
+        if return_mask:
+            # Reuse the existing selection; never infer FM from a gap threshold.
+            fm_mask = torch.zeros(batch_size, device=device, dtype=torch.bool)
+            fm_mask[torch.as_tensor(indices, device=device)] = True
+            return t, r, fm_mask
         return t, r
 
     # ========= inference  ============
@@ -307,7 +313,7 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         )
         return optimizer
 
-    def compute_loss(self, batch):
+    def compute_loss(self, batch, gap_context=None, return_diagnostics=False):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -320,7 +326,10 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         # handle different ways of passing observation
         cond = None
         e = torch.randn_like(nactions)
-        t, r = self.sample_t_r(batch_size, nactions.device)
+        if gap_context is not None or return_diagnostics:
+            t, r, fm_mask = self.sample_t_r(batch_size, nactions.device, return_mask=True)
+        else:
+            t, r = self.sample_t_r(batch_size, nactions.device)
         t_ = rearrange(t, 'B T -> B T 1').detach().clone()
         r_ = rearrange(r, 'B T -> B T 1').detach().clone()
 
@@ -348,7 +357,13 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         error = u - u_tgt.detach()
 
 
+        if gap_context is not None and self.flow_ratio != 1.0:
+            return gap_loss(error, t, r, fm_mask, gap_context, return_diagnostics)
+        # The disabled and pure-FM paths retain the original numeric operations.
         loss = adaptive_l2_loss(error)
+        if return_diagnostics:
+            _, details = gap_loss(error, t, r, fm_mask, diagnostics=True)
+            return loss, details
         return loss
 
 # Testing
