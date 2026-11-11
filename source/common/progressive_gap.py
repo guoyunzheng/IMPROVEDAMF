@@ -1,4 +1,4 @@
-"""Trajectory-level MF curriculum, applied outside adaptive loss normalization.
+"""Trajectory-level MF curriculum, applied outside the chosen per-row loss.
 
 Based on the progressive interval weighting in arXiv:2511.19065v2, adapted
 to AMF vector times by averaging the gap across the action horizon.
@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from source.common.mean_flow_schedule import fm_only_epoch_count
+from source.common.mean_flow_loss import cauchy_loss, validate_mf_loss
 
 
 def gap_config(config=None):
@@ -190,15 +191,22 @@ def gap_weights(t, r, fm_mask, progress, gap_lambda, k=1.0):
         return torch.where(fm_mask, torch.ones_like(beta), beta)
 
 
-def gap_loss(error, t, r, fm_mask, context=None, diagnostics=False):
-    """Multiply *after* detached adaptive normalization, before batch mean."""
+def gap_loss(error, t, r, fm_mask, context=None, diagnostics=False,
+             mf_loss_type="adaptive_l2", mf_loss_c=1e-3):
+    """Weight after adaptive L2 or MF-only Cauchy, before the full batch mean."""
+    validate_mf_loss(mf_loss_type, mf_loss_c)
     if error.ndim != 3 or error.shape[:2] != t.shape:
         raise ValueError("Expected error [B,H,D] matching t/r")
+    if fm_mask.shape != (error.shape[0],) or fm_mask.dtype != torch.bool or fm_mask.device != error.device:
+        raise ValueError("Expected boolean fm_mask [B] on the error device")
     mse = error.float().square().mean(dim=(1, 2))
     adaptive = mse * (mse.detach() + 1e-3).pow(-0.5)
+    objective = adaptive
+    if mf_loss_type == "cauchy":
+        objective = torch.where(fm_mask, adaptive, cauchy_loss(mse, mf_loss_c))
     weights = (torch.ones_like(mse) if context is None
                else gap_weights(t, r, fm_mask, **context))
-    weighted = weights * adaptive
+    weighted = weights * objective
     loss = weighted.mean()
     if not diagnostics:
         return loss
@@ -213,6 +221,7 @@ def gap_loss(error, t, r, fm_mask, context=None, diagnostics=False):
             if count:
                 details[f"{label}_mse"] = mse[mask].mean().item()
                 details[f"{label}_adaptive_loss"] = adaptive[mask].mean().item()
+                details[f"{label}_objective_loss"] = objective[mask].mean().item()
         mf = ~fm_mask
         if mf.any():
             details.update(mf_gap_mean=gap[mf].mean().item(),
@@ -236,8 +245,8 @@ def aggregate_diagnostics(rows):
     for key in set().union(*(row.keys() for row in rows)):
         if key.endswith("_count"):
             result[key] = sum(row.get(key, 0) for row in rows)
-        elif key.endswith("_mse") or key.endswith("_adaptive_loss"):
-            group = key.removesuffix("_mse").removesuffix("_adaptive_loss")
+        elif key.endswith(("_mse", "_adaptive_loss", "_objective_loss")):
+            group = key.removesuffix("_mse").removesuffix("_adaptive_loss").removesuffix("_objective_loss")
             count_key = group + "_count"
             count = sum(row.get(count_key, 0) for row in rows)
             if count:
