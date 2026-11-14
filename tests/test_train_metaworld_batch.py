@@ -53,6 +53,42 @@ class BatchTests(unittest.TestCase):
         self.assertIn("drawer-open", stream.getvalue())
         self.assertNotIn("pick-out-of-hole", stream.getvalue())
 
+    def test_named_batch_dry_run_routes_all_jobs_to_requested_directory(self):
+        output = self.root / "named-batches"
+        name = "KMFgudingmiddle_20261114"
+        path = self.config_file(output_root=str(output), tasks=["reach", "push"], seeds=[0, 42])
+        stream = io.StringIO()
+        with patch.object(batch.subprocess, "Popen") as spawn, \
+             patch.object(batch, "build_train_command", wraps=batch.build_train_command) as commands, \
+             contextlib.redirect_stdout(stream):
+            self.assertEqual(batch.main([
+                "--config", str(path), "--batch-name", name,
+                "--mf-target-type", "kmf_midpoint", "--dry-run",
+            ]), 0)
+        expected_directory = (output / name).resolve()
+        self.assertIn(f"Batch directory: {expected_directory}", stream.getvalue())
+        self.assertEqual(commands.call_count, 4)
+        for call in commands.call_args_list:
+            job = call.args[1]
+            self.assertEqual(Path(job["output_dir"]),
+                             expected_directory / f"{job['task']}_seed{job['seed']}")
+        self.assertFalse(output.exists())
+        spawn.assert_not_called()
+
+    def test_invalid_batch_names_fail_before_output_creation_or_spawn(self):
+        output = self.root / "invalid-batches"
+        path = self.config_file(output_root=str(output))
+        for name in ("", ".", "..", "../escape", "nested/name", "nested\\name",
+                     "/tmp/escape", "C:\\escape"):
+            with self.subTest(name=name), \
+                 patch.object(batch.subprocess, "Popen") as spawn, \
+                 contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit) as raised:
+                batch.main(["--config", str(path), "--batch-name", name, "--dry-run"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertFalse(output.exists())
+            spawn.assert_not_called()
+
     def test_epoch_cli_overrides_reach_training_and_preserve_fresh_outputs(self):
         output = self.root / "epoch-control-dry-run"
         path = self.config_file(output_root=str(output), num_epochs=501, mf_epochs=100, flow_ratio=0.5)

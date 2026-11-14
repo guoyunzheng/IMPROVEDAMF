@@ -26,6 +26,8 @@ the length of the trailing mixed FM/MF phase; earlier epochs use pure FM.
 duration. Omit phase options to retain the training YAML's schedule.
 --mf-target-type kmf_midpoint enables the fixed-midpoint Kinematic MeanFlow
 training target. The meanflow option selects the original target.
+--batch-name sets the directory name under output_root, e.g.
+KMFgudingmiddle_20261114. Omit it to use the default timestamp.
 --gap-weighting progressive enables trajectory-level MF interval weighting:
 beta = q**k + (1-q**k)*lambda*(1-mean(t-r)). q advances only over mixed-phase
 training batches; FM keeps weight 1. --gap-k controls how long small intervals
@@ -420,6 +422,7 @@ class BatchRunner:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--batch-name", help="Batch directory name under output_root; defaults to a timestamp")
     parser.add_argument("--tasks", nargs="+")
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--gpus", nargs="+", help="Physical GPU indices, e.g. --gpus 0 1")
@@ -439,10 +442,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         cfg = load_config(args.config, args)
+        if args.batch_name is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.batch_name):
+            raise ValueError("batch-name must start with a letter or digit and contain only letters, digits, dots, underscores or hyphens")
         root = Path(cfg["output_root"])
         if not root.is_absolute():
             root = REPO_ROOT / root
-        runner = BatchRunner(cfg, root / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        batch_name = args.batch_name or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        runner = BatchRunner(cfg, root / batch_name)
         capacity = len(cfg["gpus"]) * cfg["jobs_per_gpu"]
         print(f"Tasks: {', '.join(cfg['tasks'])}; seeds: {cfg['seeds']}\nGPUs: {cfg['gpus']}; maximum concurrent training jobs: {capacity}\nEpochs per job: {cfg['num_epochs']}; simulation workers per job: 50\nBatch directory: {runner.batch_dir}", flush=True)
         if cfg.get("mf_epochs") is not None:

@@ -48,13 +48,18 @@ python train.py --config-name=train_adaptive_mean_flow_transformer_lowdim_worksp
 前 200 个纯 FM、后 300 个 FM/MF 各占一半的任务配置
 
 ```bash
-python scripts/train_metaworld_batch.py --tasks reach --num-epochs 500 --mf-epochs 300 --flow-ratio 0.5 --mf-target-type kmf_midpoint --dry-run
+python scripts/train_metaworld_batch.py --tasks reach --num-epochs 500 --mf-epochs 300 --flow-ratio 0.5 --mf-target-type kmf_midpoint --batch-name "KMFgudingmiddle_$(date +%Y%m%d)" --dry-run
 ```
 
 去掉 `--dry-run` 即启动训练。可以在现有批量 JSON 中加入
 `"mf_target_type": "kmf_midpoint"`，CLI 的同名参数优先。
 `--flow-ratio` 表示 FM 样本比例，`--mf-epochs` 表示末尾混合训练阶段的 epoch 数。
 要从第一个 epoch 使用混合训练，可令 `--mf-epochs` 等于 `--num-epochs`。
+
+`--batch-name` 设置 `output_root` 下的实验目录名。上述 Bash 命令的结果目录形如
+`data/outputs/metaworld_batch/KMFgudingmiddle_20261114/`，其中每项任务仍有独立的
+`<task>_seed42/` 子目录。同日多次实验可追加 `_2`、`_3` 等序号。
+启动器会拒绝复用已存在的实验目录。省略 `--batch-name` 时使用原有时间戳命名。
 
 `policy.mf_target_type` 随训练配置保存在 checkpoint 中。推理使用已有的一步平均速度更新，
 `num_inference_steps=1`。续训已有实验时使用该实验保存的目标类型，可保持实验定义一致。
