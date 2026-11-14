@@ -42,6 +42,7 @@ policy:
   n_obs_steps: ${n_obs_steps}
   num_inference_steps: 1
   flow_ratio: ${flow_ratio}
+  mf_target_type: meanflow  # meanflow / kmf_midpoint
   flow_matching_inference: ${flow_matching_inference}
 
   t_start: ${t_start}

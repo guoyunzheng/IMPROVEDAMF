@@ -10,6 +10,7 @@ from source.model.mean_flow.transformer_for_adaptive_mean_flow import Transforme
 from source.model.diffusion.mask_generator import LowdimMaskGenerator
 from source.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
 from functools import partial
+from source.common.kinematic_mean_flow import midpoint_target
 
 def adaptive_l2_loss(error, gamma=0.5, c=1e-3):
     """
@@ -56,6 +57,7 @@ class AdaptiveMeanFlowTransformerImagePolicy(BaseImagePolicy):
             refresh_every=None,
             flow_ratio=0.50,
             flow_matching_inference=False,
+            mf_target_type="meanflow",
             # parameters passed to step
             **kwargs):
         super().__init__(
@@ -63,6 +65,8 @@ class AdaptiveMeanFlowTransformerImagePolicy(BaseImagePolicy):
             n_obs_steps=n_obs_steps,
             freeze_obs_encoder=freeze_obs_encoder
         )
+        if mf_target_type not in ("meanflow", "kmf_midpoint"):
+            raise ValueError("mf_target_type must be meanflow or kmf_midpoint")
 
         # parse shape_meta
         action_shape = shape_meta['action']['shape']
@@ -108,6 +112,7 @@ class AdaptiveMeanFlowTransformerImagePolicy(BaseImagePolicy):
         self.time_dist = time_dist
         self.monotone_schedule_ratio = monotone_schedule_ratio
         self.flow_ratio = flow_ratio
+        self.mf_target_type = mf_target_type
         self.flow_matching_inference = flow_matching_inference
         self.t_start = t_start
         self.t_end = t_end
@@ -354,6 +359,9 @@ class AdaptiveMeanFlowTransformerImagePolicy(BaseImagePolicy):
             # With r=t the target is v; no Mean Flow derivative is needed.
             u = model_partial(z, t, r)
             u_tgt = v
+        elif getattr(self, 'mf_target_type', 'meanflow') == 'kmf_midpoint':
+            u = model_partial(z, t, r)
+            u_tgt = midpoint_target(self.model, nactions, e, t, r, cond)
         else:
             jvp_args = (
                 lambda z,t,r: model_partial(z, t, r),

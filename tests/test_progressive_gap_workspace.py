@@ -71,10 +71,11 @@ class Normalizer(dict):
 
 
 class Policy(torch.nn.Module):
-    def __init__(self, flow_ratio):
+    def __init__(self, flow_ratio, mf_target_type='meanflow'):
         super().__init__()
         self.horizon, self.n_obs_steps = 6, 2
         self.flow_ratio = flow_ratio
+        self.mf_target_type = mf_target_type
         self.monotone_schedule_ratio = .5
         self.time_dist = ['lognorm', -.4, 1.]
         self.normalizer = Normalizer()
@@ -123,7 +124,7 @@ class Runner:
 
 def instantiate(cfg, **kwargs):
     if cfg.kind == 'policy':
-        return Policy(cfg.flow_ratio)
+        return Policy(cfg.flow_ratio, cfg.get('mf_target_type', 'meanflow'))
     if cfg.kind == 'dataset':
         return Dataset()
     if cfg.kind == 'runner':
@@ -207,6 +208,13 @@ class WorkspaceSmokeTests(unittest.TestCase):
         return workspace
 
     def test_train_validate_save_resume_matches_continuous_next_batch_and_weights(self):
+        self.check_train_and_resume()
+
+    def test_midpoint_train_validate_save_resume_preserves_target_and_weights(self):
+        self.cfg.policy.mf_target_type = 'kmf_midpoint'
+        self.check_train_and_resume()
+
+    def check_train_and_resume(self):
         full = self.make_workspace(self.root / 'continuous')
         full.run()
         interrupted = self.make_workspace(self.root / 'resumed', stop_epoch=1)
@@ -218,6 +226,11 @@ class WorkspaceSmokeTests(unittest.TestCase):
             resumed.run()
         self.assertEqual(resumed.epoch, 4)
         self.assertEqual(resumed.global_step, 8)  # max_train_steps=2, not full dataloader length.
+        self.assertEqual(resumed.model.mf_target_type, self.cfg.policy.get('mf_target_type', 'meanflow'))
+        self.assertEqual(resumed.ema_model.mf_target_type, resumed.model.mf_target_type)
+        with resumed.get_checkpoint_path().open('rb') as stream:
+            payload = torch.load(stream, pickle_module=dill, weights_only=False)
+        self.assertEqual(payload['cfg'].policy, self.cfg.policy)
         self.assertEqual(resumed.progressive_gap_state, full.progressive_gap_state)
         self.assertEqual(resumed.progressive_gap_state['planned_joint_batches'], 6)
         for key, expected in full.model.state_dict().items():

@@ -78,6 +78,53 @@ class BatchTests(unittest.TestCase):
         self.assertIn("training.num_epochs=801", command)
         self.assertIn("++training.flow_ratio_schedule.fm_only_epochs=401", command)
 
+    def test_midpoint_target_cli_reaches_every_job_with_phase_and_gap_options(self):
+        output = self.root / 'midpoint-dry-run'
+        path = self.config_file(output_root=str(output), tasks=['reach', 'push'], seeds=[0, 42])
+        stream = io.StringIO()
+        with patch.object(batch.subprocess, 'Popen') as spawn, contextlib.redirect_stdout(stream):
+            self.assertEqual(batch.main([
+                '--config', str(path), '--mf-target-type', 'kmf_midpoint',
+                '--num-epochs', '500', '--mf-epochs', '300', '--flow-ratio', '0.5',
+                '--gap-weighting', 'progressive', '--gap-k', '2', '--dry-run',
+            ]), 0)
+        spawn.assert_not_called()
+        self.assertFalse(output.exists())
+        text = stream.getvalue()
+        self.assertIn('MF target: kmf_midpoint', text)
+        for override in ('policy.mf_target_type=kmf_midpoint', 'training.num_epochs=500',
+                         '++training.flow_ratio_schedule.fm_only_epochs=200', 'flow_ratio=0.5',
+                         'training.progressive_gap_weighting.enabled=true',
+                         'training.progressive_gap_weighting.k=2.0'):
+            self.assertEqual(text.count(override), 4)
+
+    def test_target_json_and_cli_override_support_both_mean_flow_configs(self):
+        for config_name in sorted(batch.MEAN_FLOW_CONFIGS):
+            path = self.config_file(config_name=config_name, mf_target_type='kmf_midpoint')
+            for args, expected in ((None, 'kmf_midpoint'),
+                                   (SimpleNamespace(mf_target_type='meanflow'), 'meanflow')):
+                with self.subTest(config_name=config_name, expected=expected):
+                    cfg = batch.load_config(path, args)
+                    command = batch.build_train_command(
+                        cfg, dict(task='reach', seed=42, output_dir=self.root))
+                    self.assertIn('policy.mf_target_type=' + expected, command)
+
+    def test_invalid_target_settings_fail_before_launch(self):
+        for changes in (dict(mf_target_type='unknown'), dict(mf_target_type=None),
+                        dict(mf_target_type=True), dict(mf_target_type=1),
+                        dict(mf_target_type=[]), dict(mf_target_type={}),
+                        dict(mf_target_type='kmf_midpoint',
+                             config_name='train_flow_matching_transformer_lowdim_workspace')):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                batch.load_config(self.config_file(**changes))
+
+    def test_invalid_target_cli_exits_before_spawn(self):
+        with patch.object(batch.subprocess, 'Popen') as spawn, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            batch.main(['--mf-target-type', 'unknown', '--dry-run'])
+        self.assertEqual(raised.exception.code, 2)
+        spawn.assert_not_called()
+
     def test_gap_cli_options_and_ablation_modes_reach_training(self):
         for mode in ('progressive', 'constant_small_gap', 'off'):
             stream = io.StringIO()
@@ -125,6 +172,7 @@ class BatchTests(unittest.TestCase):
                 cfg = batch.load_config(path)
                 command = batch.build_train_command(cfg, {"task": cfg["tasks"][0], "seed": 42, "output_dir": self.root})
                 self.assertFalse(any("flow_ratio" in part for part in command))
+                self.assertFalse(any(part.startswith('policy.mf_target_type=') for part in command))
 
     def test_separate_outputs_gpu_remapping_and_checkpoint_selection(self):
         cfg = {**self.cfg, "seeds": [0, 42]}

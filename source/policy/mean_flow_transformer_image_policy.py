@@ -12,6 +12,7 @@ from source.model.vision.model_getter import get_resnet
 from source.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
 from source.common.pytorch_util import dict_apply
 from functools import partial
+from source.common.kinematic_mean_flow import midpoint_target
 
 def adaptive_l2_loss(error, gamma=0.5, c=1e-3):
     """
@@ -55,6 +56,7 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
             use_ptp=False,
             ptp_n_sample=32,
             ptp_only_past = False,
+            mf_target_type="meanflow",
             # parameters passed to step
             **kwargs):
         super().__init__(
@@ -62,6 +64,8 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
             n_obs_steps=n_obs_steps,
             freeze_obs_encoder=freeze_obs_encoder
         )
+        if mf_target_type not in ("meanflow", "kmf_midpoint"):
+            raise ValueError("mf_target_type must be meanflow or kmf_midpoint")
 
         # parse shape_meta
         action_shape = shape_meta['action']['shape']
@@ -106,6 +110,7 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
         self.n_obs_steps = n_obs_steps
         self.time_dist = time_dist
         self.flow_ratio = flow_ratio
+        self.mf_target_type = mf_target_type
         self.flow_matching_inference = flow_matching_inference
         self.kwargs = kwargs
 
@@ -324,6 +329,9 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
             # With r=t the target is v; no Mean Flow derivative is needed.
             u = model_partial(z, t, r)
             u_tgt = v
+        elif getattr(self, 'mf_target_type', 'meanflow') == 'kmf_midpoint':
+            u = model_partial(z, t, r)
+            u_tgt = midpoint_target(self.model, nactions, e, t, r, cond)
         else:
             jvp_args = (
                 lambda z,t,r: model_partial(z, t, r),

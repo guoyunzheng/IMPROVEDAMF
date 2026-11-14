@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from source.common.mean_flow_schedule import scheduled_flow_ratio
+from source.common.kinematic_mean_flow import midpoint_target
 
 
 SCHEDULE = {"enabled": True, "fm_only_fraction": 0.8}
@@ -80,7 +81,7 @@ class TinyVelocity(torch.nn.Module):
         return self.scale * (z + 0.3 * t + 0.2 * r)
 
 
-def training_fixture(filename, flow_ratio):
+def training_fixture(filename, flow_ratio, mf_target_type="meanflow"):
     # Load the actual sampling/loss methods without importing optional vision,
     # dataset, or simulation packages. Only the model and normalization are fakes.
     path = Path(__file__).resolve().parents[1] / "source/policy" / filename
@@ -92,12 +93,14 @@ def training_fixture(filename, flow_ratio):
                      and node.name in {"sample_t_r", "compute_loss"})
     namespace = {
         "np": np, "torch": torch, "partial": partial,
+        "midpoint_target": midpoint_target,
         # Both production rearrange patterns just append singleton dimensions.
         "rearrange": lambda tensor, pattern: tensor.reshape(tensor.shape[0], -1, 1),
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(path), "exec"), namespace)
     policy = SimpleNamespace(
         flow_ratio=flow_ratio, horizon=6, n_obs_steps=2,
+        mf_target_type=mf_target_type,
         monotone_schedule_ratio=0.5, time_dist=["lognorm", -0.4, 1.0],
         normalizer=IdentityNormalizer(), model=TinyVelocity(),
     )

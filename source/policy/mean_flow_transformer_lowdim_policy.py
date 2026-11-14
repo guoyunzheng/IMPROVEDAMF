@@ -9,6 +9,7 @@ from source.policy.base_lowdim_policy import BaseLowdimPolicy
 from source.model.mean_flow.transformer_for_mean_flow import TransformerForMeanFlow
 from source.model.diffusion.mask_generator import LowdimMaskGenerator
 from functools import partial
+from source.common.kinematic_mean_flow import midpoint_target
 
 def adaptive_l2_loss(error, gamma=0.5, c=1e-3):
     """
@@ -50,9 +51,12 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
             use_warm_start=False,
             warm_start_t=0.5,
             refresh_every=None,
+            mf_target_type="meanflow",
             # parameters passed to step
             **kwargs):
         super().__init__()
+        if mf_target_type not in ("meanflow", "kmf_midpoint"):
+            raise ValueError("mf_target_type must be meanflow or kmf_midpoint")
 
         # create diffusion model
         input_dim = action_dim
@@ -89,6 +93,7 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         self.n_obs_steps = n_obs_steps
         self.time_dist = time_dist
         self.flow_ratio = flow_ratio
+        self.mf_target_type = mf_target_type
         self.flow_matching_inference = flow_matching_inference
         self.use_warm_start = use_warm_start
         self.warm_start_t = warm_start_t
@@ -313,6 +318,9 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
             # With r=t the target is v; no Mean Flow derivative is needed.
             u = model_partial(z, t, r)
             u_tgt = v
+        elif getattr(self, 'mf_target_type', 'meanflow') == 'kmf_midpoint':
+            u = model_partial(z, t, r)
+            u_tgt = midpoint_target(self.model, nactions, e, t, r, cond)
         else:
             jvp_args = (
                 lambda z,t,r: model_partial(z, t, r),
