@@ -71,12 +71,10 @@ class Normalizer(dict):
 
 
 class Policy(torch.nn.Module):
-    def __init__(self, flow_ratio, mf_loss_type='adaptive_l2', mf_loss_c=1e-3):
+    def __init__(self, flow_ratio):
         super().__init__()
         self.horizon, self.n_obs_steps = 6, 2
         self.flow_ratio = flow_ratio
-        self.mf_loss_type = mf_loss_type
-        self.mf_loss_c = mf_loss_c
         self.monotone_schedule_ratio = .5
         self.time_dist = ['lognorm', -.4, 1.]
         self.normalizer = Normalizer()
@@ -125,8 +123,7 @@ class Runner:
 
 def instantiate(cfg, **kwargs):
     if cfg.kind == 'policy':
-        return Policy(cfg.flow_ratio, cfg.get('mf_loss_type', 'adaptive_l2'),
-                      cfg.get('mf_loss_c', 1e-3))
+        return Policy(cfg.flow_ratio)
     if cfg.kind == 'dataset':
         return Dataset()
     if cfg.kind == 'runner':
@@ -210,14 +207,6 @@ class WorkspaceSmokeTests(unittest.TestCase):
         return workspace
 
     def test_train_validate_save_resume_matches_continuous_next_batch_and_weights(self):
-        self.check_train_and_resume()
-
-    def test_cauchy_train_validate_save_resume_matches_continuous(self):
-        self.cfg.policy.mf_loss_type = 'cauchy'
-        self.cfg.policy.mf_loss_c = .07
-        self.check_train_and_resume()
-
-    def check_train_and_resume(self):
         full = self.make_workspace(self.root / 'continuous')
         full.run()
         interrupted = self.make_workspace(self.root / 'resumed', stop_epoch=1)
@@ -229,11 +218,6 @@ class WorkspaceSmokeTests(unittest.TestCase):
             resumed.run()
         self.assertEqual(resumed.epoch, 4)
         self.assertEqual(resumed.global_step, 8)  # max_train_steps=2, not full dataloader length.
-        self.assertEqual(resumed.model.mf_loss_type, self.cfg.policy.get('mf_loss_type', 'adaptive_l2'))
-        self.assertEqual(resumed.model.mf_loss_c, self.cfg.policy.get('mf_loss_c', 1e-3))
-        with resumed.get_checkpoint_path().open('rb') as stream:
-            saved = torch.load(stream, pickle_module=dill, weights_only=False)
-        self.assertEqual(saved['cfg'].policy, self.cfg.policy)
         self.assertEqual(resumed.progressive_gap_state, full.progressive_gap_state)
         self.assertEqual(resumed.progressive_gap_state['planned_joint_batches'], 6)
         for key, expected in full.model.state_dict().items():
@@ -247,9 +231,6 @@ class WorkspaceSmokeTests(unittest.TestCase):
         self.assertEqual(final['mf_weight_mean'], 1.)
         self.assertIn('val_fm_mse', final)
         self.assertIn('val_mf_mse', final)
-        self.assertIn('val_mf_objective_loss', final)
-        if self.cfg.policy.get('mf_loss_type') == 'cauchy':
-            self.assertNotEqual(final['val_mf_objective_loss'], final['val_mf_adaptive_loss'])
         self.assertEqual(sum(final.get(f'val_mf_gap_bin_{i}_count', 0) for i in range(4)), 5)
 
     def test_debug_limits_used_before_planning_and_zero_joint_is_safe(self):

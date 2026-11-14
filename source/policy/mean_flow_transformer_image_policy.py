@@ -2,7 +2,6 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from source.common.mean_flow_loss import cauchy_mf_loss, validate_mf_loss
 from einops import rearrange
 
 from source.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
@@ -56,8 +55,6 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
             use_ptp=False,
             ptp_n_sample=32,
             ptp_only_past = False,
-            mf_loss_type="adaptive_l2",
-            mf_loss_c=1e-3,
             # parameters passed to step
             **kwargs):
         super().__init__(
@@ -109,9 +106,6 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
         self.n_obs_steps = n_obs_steps
         self.time_dist = time_dist
         self.flow_ratio = flow_ratio
-        validate_mf_loss(mf_loss_type, mf_loss_c)
-        self.mf_loss_type = mf_loss_type
-        self.mf_loss_c = mf_loss_c
         self.flow_matching_inference = flow_matching_inference
         self.kwargs = kwargs
 
@@ -123,7 +117,7 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
         self.ptp_only_past = ptp_only_past
         self.prev_action_pred: torch.Tensor = None
 
-    def sample_t_r(self, batch_size, device, return_mask=False):
+    def sample_t_r(self, batch_size, device):
         if self.time_dist[0] == 'uniform':
             samples = np.random.rand(batch_size, 2).astype(np.float32)
 
@@ -142,11 +136,6 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
 
         t = torch.tensor(t_np, device=device)
         r = torch.tensor(r_np, device=device)
-        if return_mask:
-            # Use the sampler's selection, including MF rows with tiny gaps.
-            fm_mask = torch.zeros(batch_size, device=device, dtype=torch.bool)
-            fm_mask[torch.as_tensor(indices, device=device)] = True
-            return t, r, fm_mask
         return t, r
 
     # ========= inference  ============
@@ -318,11 +307,7 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
         # handle different ways of passing observation
         cond = None
         e = torch.randn_like(nactions)
-        use_cauchy = getattr(self, 'mf_loss_type', 'adaptive_l2') == 'cauchy' and self.flow_ratio != 1.0
-        if use_cauchy:
-            t, r, fm_mask = self.sample_t_r(batch_size, nactions.device, return_mask=True)
-        else:
-            t, r = self.sample_t_r(batch_size, nactions.device)
+        t, r = self.sample_t_r(batch_size, nactions.device)
         t_ = rearrange(t, 'B -> B 1 1').detach().clone()
         r_ = rearrange(r, 'B -> B 1 1').detach().clone()
 
@@ -350,6 +335,5 @@ class MeanFlowTransformerImagePolicy(BaseImagePolicy):
         error = u - u_tgt.detach()
 
 
-        loss = (cauchy_mf_loss(error, fm_mask, self.mf_loss_c)
-                if use_cauchy else adaptive_l2_loss(error))
+        loss = adaptive_l2_loss(error)
         return loss

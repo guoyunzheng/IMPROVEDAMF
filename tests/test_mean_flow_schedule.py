@@ -11,7 +11,6 @@ import numpy as np
 import torch
 
 from source.common.mean_flow_schedule import scheduled_flow_ratio
-from source.common.mean_flow_loss import cauchy_mf_loss
 
 
 SCHEDULE = {"enabled": True, "fm_only_fraction": 0.8}
@@ -93,7 +92,6 @@ def training_fixture(filename, flow_ratio):
                      and node.name in {"sample_t_r", "compute_loss"})
     namespace = {
         "np": np, "torch": torch, "partial": partial,
-        "cauchy_mf_loss": cauchy_mf_loss,
         # Both production rearrange patterns just append singleton dimensions.
         "rearrange": lambda tensor, pattern: tensor.reshape(tensor.shape[0], -1, 1),
     }

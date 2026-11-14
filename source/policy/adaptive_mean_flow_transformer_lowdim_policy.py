@@ -2,7 +2,6 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from source.common.mean_flow_loss import cauchy_mf_loss, validate_mf_loss
 from einops import rearrange
 
 from source.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
@@ -54,8 +53,6 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
             refresh_every=None,
             flow_ratio=0.50,
             flow_matching_inference=False,
-            mf_loss_type="adaptive_l2",
-            mf_loss_c=1e-3,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -97,9 +94,6 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         self.time_dist = time_dist
         self.monotone_schedule_ratio = monotone_schedule_ratio
         self.flow_ratio = flow_ratio
-        validate_mf_loss(mf_loss_type, mf_loss_c)
-        self.mf_loss_type = mf_loss_type
-        self.mf_loss_c = mf_loss_c
         self.flow_matching_inference = flow_matching_inference
         self.t_start = t_start
         self.t_end = t_end
@@ -332,10 +326,7 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         # handle different ways of passing observation
         cond = None
         e = torch.randn_like(nactions)
-        mf_loss_type = getattr(self, 'mf_loss_type', 'adaptive_l2')
-        mf_loss_c = getattr(self, 'mf_loss_c', 1e-3)
-        use_cauchy = mf_loss_type == 'cauchy' and self.flow_ratio != 1.0
-        if gap_context is not None or return_diagnostics or use_cauchy:
+        if gap_context is not None or return_diagnostics:
             t, r, fm_mask = self.sample_t_r(batch_size, nactions.device, return_mask=True)
         else:
             t, r = self.sample_t_r(batch_size, nactions.device)
@@ -367,14 +358,11 @@ class AdaptiveMeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
 
 
         if gap_context is not None and self.flow_ratio != 1.0:
-            return gap_loss(error, t, r, fm_mask, gap_context, return_diagnostics,
-                            mf_loss_type=mf_loss_type, mf_loss_c=mf_loss_c)
-        # The baseline and pure-FM paths retain the original numeric operations.
-        loss = (cauchy_mf_loss(error, fm_mask, mf_loss_c)
-                if use_cauchy else adaptive_l2_loss(error))
+            return gap_loss(error, t, r, fm_mask, gap_context, return_diagnostics)
+        # The disabled and pure-FM paths retain the original numeric operations.
+        loss = adaptive_l2_loss(error)
         if return_diagnostics:
-            _, details = gap_loss(error, t, r, fm_mask, diagnostics=True,
-                                  mf_loss_type=mf_loss_type, mf_loss_c=mf_loss_c)
+            _, details = gap_loss(error, t, r, fm_mask, diagnostics=True)
             return loss, details
         return loss
 

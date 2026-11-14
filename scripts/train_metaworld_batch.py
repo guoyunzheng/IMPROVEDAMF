@@ -24,9 +24,6 @@ users' workloads. MetaWorld still creates 50 simulation workers per training job
 the length of the trailing mixed FM/MF phase; earlier epochs use pure FM.
 --flow-ratio is the FM sample fraction within that trailing phase, not its
 duration. Omit phase options to retain the training YAML's schedule.
---mf-loss-type cauchy selects fixed-scale log loss for MF samples only;
---mf-loss-c sets its positive scale. FM retains adaptive L2. Omit these options
-to retain the training YAML's loss settings (adaptive_l2 baseline by default).
 --gap-weighting progressive enables trajectory-level MF interval weighting:
 beta = q**k + (1-q**k)*lambda*(1-mean(t-r)). q advances only over mixed-phase
 training batches; FM keeps weight 1. --gap-k controls how long small intervals
@@ -65,8 +62,7 @@ CONFIG_KEYS = {
     "checkpoint_top_k", "output_root",
 }
 GAP_CONFIG_KEYS = {"gap_weighting", "gap_k", "gap_lambda", "gap_calibration_batches", "gap_calibration_seed"}
-MF_LOSS_CONFIG_KEYS = {"mf_loss_type", "mf_loss_c"}
-OPTIONAL_CONFIG_KEYS = {"mf_epochs", "flow_ratio"} | GAP_CONFIG_KEYS | MF_LOSS_CONFIG_KEYS
+OPTIONAL_CONFIG_KEYS = {"mf_epochs", "flow_ratio"} | GAP_CONFIG_KEYS
 MEAN_FLOW_CONFIGS = {
     "train_adaptive_mean_flow_transformer_lowdim_workspace",
     "train_mean_flow_transformer_lowdim_workspace",
@@ -94,8 +90,7 @@ def load_config(path, args=None):
         raise ValueError("Batch config requires: " + ", ".join(sorted(CONFIG_KEYS))
                          + "; optional: " + ", ".join(sorted(OPTIONAL_CONFIG_KEYS)))
     if args is not None:
-        for key in ("tasks", "seeds", "gpus", "jobs_per_gpu", "num_epochs", "mf_epochs", "flow_ratio",
-                    *sorted(GAP_CONFIG_KEYS), *sorted(MF_LOSS_CONFIG_KEYS)):
+        for key in ("tasks", "seeds", "gpus", "jobs_per_gpu", "num_epochs", "mf_epochs", "flow_ratio", *sorted(GAP_CONFIG_KEYS)):
             value = getattr(args, key, None)
             if value is not None:
                 cfg[key] = value
@@ -131,15 +126,6 @@ def load_config(path, args=None):
         raise ValueError("flow_ratio must be a number in [0, 1] (FM sample fraction)")
     if (mf_epochs is not None or flow_ratio is not None) and cfg["config_name"] not in MEAN_FLOW_CONFIGS:
         raise ValueError("mf_epochs and flow_ratio require a Mean Flow lowdim training config")
-    if MF_LOSS_CONFIG_KEYS & cfg.keys():
-        if cfg["config_name"] not in MEAN_FLOW_CONFIGS:
-            raise ValueError("mf_loss_type and mf_loss_c require a Mean Flow lowdim training config")
-        if "mf_loss_type" in cfg and cfg["mf_loss_type"] not in ("adaptive_l2", "cauchy"):
-            raise ValueError("mf_loss_type must be adaptive_l2 or cauchy")
-        if "mf_loss_c" in cfg:
-            c = cfg["mf_loss_c"]
-            if type(c) not in (int, float) or not math.isfinite(c) or c <= 0:
-                raise ValueError("mf_loss_c must be finite and positive")
     if GAP_CONFIG_KEYS & cfg.keys():
         if cfg["config_name"] != "train_adaptive_mean_flow_transformer_lowdim_workspace":
             raise ValueError("Gap weighting currently requires AMF lowdim")
@@ -192,9 +178,6 @@ def build_train_command(cfg, job):
         ])
     if cfg.get("flow_ratio") is not None:
         command.append(f"flow_ratio={cfg['flow_ratio']}")
-    for key in sorted(MF_LOSS_CONFIG_KEYS):
-        if key in cfg:
-            command.append(f"policy.{key}={cfg[key]}")
     prefix = "training.progressive_gap_weighting."
     if "gap_weighting" in cfg:
         mode = cfg["gap_weighting"]
@@ -434,9 +417,6 @@ def main(argv=None):
     parser.add_argument("--num-epochs", type=int, help="Total actual training epochs; log indices run from 0 to N-1")
     parser.add_argument("--mf-epochs", type=int, help="Trailing mixed FM/MF epochs; preceding epochs use pure FM")
     parser.add_argument("--flow-ratio", type=float, help="FM sample fraction in the mixed phase (e.g. 0.2 means 20%% FM, 80%% MF)")
-    parser.add_argument("--mf-loss-type", choices=("adaptive_l2", "cauchy"),
-                        help="MF sample loss; FM and pure-FM warmup retain adaptive L2")
-    parser.add_argument("--mf-loss-c", type=float, help="Finite positive fixed scale for MF Cauchy loss")
     parser.add_argument("--gap-weighting", choices=("off", "progressive", "constant_small_gap"),
                         help="AMF lowdim MF interval weighting; omitted preserves the YAML default (off)")
     parser.add_argument("--gap-k", type=float, help="Progress exponent; >1 retains small-gap preference longer")
@@ -459,9 +439,6 @@ def main(argv=None):
                   f"final epoch index={cfg['num_epochs'] - 1}", flush=True)
         if cfg.get("flow_ratio") is not None:
             print(f"Mixed-phase samples: FM={cfg['flow_ratio']:.0%}, MF={1 - cfg['flow_ratio']:.0%}", flush=True)
-        if MF_LOSS_CONFIG_KEYS & cfg.keys():
-            print(f"MF loss: {cfg.get('mf_loss_type', 'training YAML default')}; "
-                  f"c={cfg.get('mf_loss_c', 'training YAML default')}; FM loss unchanged", flush=True)
         if "gap_weighting" in cfg:
             print(f"MF gap weighting: {cfg['gap_weighting']}; k={cfg.get('gap_k', 1.0)}; "
                   f"lambda={cfg.get('gap_lambda', 'calibrate once')}", flush=True)

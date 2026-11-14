@@ -78,61 +78,6 @@ class BatchTests(unittest.TestCase):
         self.assertIn("training.num_epochs=801", command)
         self.assertIn("++training.flow_ratio_schedule.fm_only_epochs=401", command)
 
-    def test_mf_cauchy_cli_reaches_all_16_jobs_with_original_phase_and_gap_settings(self):
-        tasks = ["assembly", "button-press-topdown", "drawer-open", "door-open",
-                 "faucet-open", "hammer", "bin-picking", "pick-place-wall",
-                 "plate-slide-back", "soccer", "sweep-into", "disassemble",
-                 "reach", "reach-wall", "pick-out-of-hole", "box-close"]
-        commands = []
-        original = batch.build_train_command
-
-        def capture(cfg, job):
-            command = original(cfg, job)
-            commands.append((cfg, job, command))
-            return command
-
-        stream = io.StringIO()
-        with patch.object(batch, 'build_train_command', side_effect=capture), \
-                patch.object(batch.subprocess, 'Popen') as spawn, contextlib.redirect_stdout(stream):
-            result = batch.main([
-                '--tasks', *tasks, '--seeds', '42', '--gpus', '0', '--jobs-per-gpu', '8',
-                '--num-epochs', '500', '--mf-epochs', '300', '--flow-ratio', '0.5',
-                '--gap-weighting', 'progressive', '--gap-k', '1',
-                '--mf-loss-type', 'cauchy', '--mf-loss-c', '0.01', '--dry-run',
-            ])
-        self.assertEqual(result, 0)
-        spawn.assert_not_called()
-        self.assertEqual([job['task'] for _, job, _ in commands], tasks)
-        self.assertEqual(len({job['output_dir'] for _, job, _ in commands}), 16)
-        for cfg, job, command in commands:
-            self.assertEqual(cfg['jobs_per_gpu'], 8)
-            self.assertEqual(cfg['gpus'], ['0'])
-            self.assertEqual(job['seed'], 42)
-            for override in ('training.num_epochs=500', 'training.resume=false',
-                             '++training.flow_ratio_schedule.fm_only_epochs=200',
-                             'flow_ratio=0.5', 'policy.mf_loss_type=cauchy', 'policy.mf_loss_c=0.01',
-                             'training.progressive_gap_weighting.enabled=true',
-                             'training.progressive_gap_weighting.mode=progressive',
-                             'training.progressive_gap_weighting.k=1.0'):
-                self.assertIn(override, command)
-        self.assertIn('MF loss: cauchy; c=0.01; FM loss unchanged', stream.getvalue())
-
-    def test_mf_loss_json_settings_and_cli_override(self):
-        path = self.config_file(mf_loss_type='cauchy', mf_loss_c=.1)
-        cfg = batch.load_config(path, SimpleNamespace(mf_loss_type='adaptive_l2', mf_loss_c=.01))
-        command = batch.build_train_command(cfg, dict(task='reach', seed=42, output_dir=self.root))
-        self.assertIn('policy.mf_loss_type=adaptive_l2', command)
-        self.assertIn('policy.mf_loss_c=0.01', command)
-
-    def test_invalid_mf_loss_settings_fail_before_launch(self):
-        for changes in (dict(mf_loss_type='unknown'), dict(mf_loss_type=None),
-                        dict(mf_loss_c=0), dict(mf_loss_c=-1), dict(mf_loss_c=True),
-                        dict(mf_loss_c=float('nan')), dict(mf_loss_c=float('inf')),
-                        dict(mf_loss_c='0.01'), dict(mf_loss_c=None),
-                        dict(mf_loss_type='cauchy', config_name='train_flow_matching_transformer_lowdim_workspace')):
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                batch.load_config(self.config_file(**changes))
-
     def test_gap_cli_options_and_ablation_modes_reach_training(self):
         for mode in ('progressive', 'constant_small_gap', 'off'):
             stream = io.StringIO()
@@ -180,7 +125,6 @@ class BatchTests(unittest.TestCase):
                 cfg = batch.load_config(path)
                 command = batch.build_train_command(cfg, {"task": cfg["tasks"][0], "seed": 42, "output_dir": self.root})
                 self.assertFalse(any("flow_ratio" in part for part in command))
-                self.assertFalse(any(part.startswith('policy.mf_loss_') for part in command))
 
     def test_separate_outputs_gpu_remapping_and_checkpoint_selection(self):
         cfg = {**self.cfg, "seeds": [0, 42]}

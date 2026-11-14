@@ -42,9 +42,6 @@ policy:
   n_obs_steps: ${n_obs_steps}
   num_inference_steps: 1
   flow_ratio: ${flow_ratio}
-  # 仅切换 MF 样本损失；FM 始终保留原有自适应 L2。
-  mf_loss_type: adaptive_l2  # adaptive_l2 / cauchy
-  mf_loss_c: 1.0e-3  # 固定尺度，只用于 cauchy，必须有限且大于 0。
   flow_matching_inference: ${flow_matching_inference}
 
   t_start: ${t_start}
