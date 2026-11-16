@@ -26,6 +26,9 @@ the length of the trailing mixed FM/MF phase; earlier epochs use pure FM.
 duration. Omit phase options to retain the training YAML's schedule.
 --mf-target-type kmf_midpoint enables the fixed-midpoint Kinematic MeanFlow
 training target. The meanflow option selects the original target.
+--mf-target-type kmf_learnable learns the interval split from its time endpoints.
+--kmf-alpha weights its auxiliary loss and --kmf-gamma-max bounds the scheduled
+consistency weight, with YAML defaults of 0.1 and 0.5 respectively.
 --batch-name sets the directory name under output_root, e.g.
 KMFgudingmiddle_20261114. Omit it to use the default timestamp.
 --gap-weighting progressive enables trajectory-level MF interval weighting:
@@ -66,7 +69,8 @@ CONFIG_KEYS = {
     "checkpoint_top_k", "output_root",
 }
 GAP_CONFIG_KEYS = {"gap_weighting", "gap_k", "gap_lambda", "gap_calibration_batches", "gap_calibration_seed"}
-OPTIONAL_CONFIG_KEYS = {"mf_epochs", "flow_ratio", "mf_target_type"} | GAP_CONFIG_KEYS
+KMF_CONFIG_KEYS = {"kmf_alpha", "kmf_gamma_max"}
+OPTIONAL_CONFIG_KEYS = {"mf_epochs", "flow_ratio", "mf_target_type"} | GAP_CONFIG_KEYS | KMF_CONFIG_KEYS
 MEAN_FLOW_CONFIGS = {
     "train_adaptive_mean_flow_transformer_lowdim_workspace",
     "train_mean_flow_transformer_lowdim_workspace",
@@ -95,7 +99,7 @@ def load_config(path, args=None):
                          + "; optional: " + ", ".join(sorted(OPTIONAL_CONFIG_KEYS)))
     if args is not None:
         for key in ("tasks", "seeds", "gpus", "jobs_per_gpu", "num_epochs", "mf_epochs", "flow_ratio",
-                    "mf_target_type", *sorted(GAP_CONFIG_KEYS)):
+                    "mf_target_type", *sorted(GAP_CONFIG_KEYS), *sorted(KMF_CONFIG_KEYS)):
             value = getattr(args, key, None)
             if value is not None:
                 cfg[key] = value
@@ -134,8 +138,17 @@ def load_config(path, args=None):
     if "mf_target_type" in cfg:
         if cfg["config_name"] not in MEAN_FLOW_CONFIGS:
             raise ValueError("mf_target_type requires a Mean Flow lowdim training config")
-        if cfg["mf_target_type"] not in ("meanflow", "kmf_midpoint"):
-            raise ValueError("mf_target_type must be meanflow or kmf_midpoint")
+        if cfg["mf_target_type"] not in ("meanflow", "kmf_midpoint", "kmf_learnable"):
+            raise ValueError("mf_target_type must be meanflow, kmf_midpoint or kmf_learnable")
+    if KMF_CONFIG_KEYS & cfg.keys():
+        if cfg["config_name"] not in MEAN_FLOW_CONFIGS:
+            raise ValueError("K-MF parameters require a Mean Flow lowdim training config")
+        for key in KMF_CONFIG_KEYS & cfg.keys():
+            value = cfg[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{key} must be finite and nonnegative")
+        if cfg.get("kmf_gamma_max", 0.5) > 1:
+            raise ValueError("kmf_gamma_max must lie in [0, 1]")
     if GAP_CONFIG_KEYS & cfg.keys():
         if cfg["config_name"] != "train_adaptive_mean_flow_transformer_lowdim_workspace":
             raise ValueError("Gap weighting currently requires AMF lowdim")
@@ -190,6 +203,9 @@ def build_train_command(cfg, job):
         command.append(f"flow_ratio={cfg['flow_ratio']}")
     if "mf_target_type" in cfg:
         command.append(f"policy.mf_target_type={cfg['mf_target_type']}")
+    for key in sorted(KMF_CONFIG_KEYS):
+        if key in cfg:
+            command.append(f"policy.{key}={cfg[key]}")
     prefix = "training.progressive_gap_weighting."
     if "gap_weighting" in cfg:
         mode = cfg["gap_weighting"]
@@ -430,8 +446,10 @@ def main(argv=None):
     parser.add_argument("--num-epochs", type=int, help="Total actual training epochs; log indices run from 0 to N-1")
     parser.add_argument("--mf-epochs", type=int, help="Trailing mixed FM/MF epochs; preceding epochs use pure FM")
     parser.add_argument("--flow-ratio", type=float, help="FM sample fraction in the mixed phase (e.g. 0.2 means 20%% FM, 80%% MF)")
-    parser.add_argument("--mf-target-type", choices=("meanflow", "kmf_midpoint"),
-                        help="Mean Flow training target; kmf_midpoint uses two sub-interval derivatives at the fixed midpoint")
+    parser.add_argument("--mf-target-type", choices=("meanflow", "kmf_midpoint", "kmf_learnable"),
+                        help="Mean Flow training target; K-MF uses fixed-midpoint or learned sub-intervals")
+    parser.add_argument("--kmf-alpha", type=float, help="Finite nonnegative weight of the learned-split auxiliary loss")
+    parser.add_argument("--kmf-gamma-max", type=float, help="Consistency schedule bound in [0, 1]; gamma advances from -max to +max")
     parser.add_argument("--gap-weighting", choices=("off", "progressive", "constant_small_gap"),
                         help="AMF lowdim MF interval weighting; omitted preserves the YAML default (off)")
     parser.add_argument("--gap-k", type=float, help="Progress exponent; >1 retains small-gap preference longer")
@@ -459,6 +477,9 @@ def main(argv=None):
             print(f"Mixed-phase samples: FM={cfg['flow_ratio']:.0%}, MF={1 - cfg['flow_ratio']:.0%}", flush=True)
         if "mf_target_type" in cfg:
             print(f"MF target: {cfg['mf_target_type']}", flush=True)
+        if KMF_CONFIG_KEYS & cfg.keys():
+            print(f"K-MF generator: alpha={cfg.get('kmf_alpha', 'training YAML default')}; "
+                  f"gamma_max={cfg.get('kmf_gamma_max', 'training YAML default')}", flush=True)
         if "gap_weighting" in cfg:
             print(f"MF gap weighting: {cfg['gap_weighting']}; k={cfg.get('gap_k', 1.0)}; "
                   f"lambda={cfg.get('gap_lambda', 'calibrate once')}", flush=True)

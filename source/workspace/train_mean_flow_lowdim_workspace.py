@@ -19,6 +19,7 @@ from source.env_runner.base_lowdim_runner import BaseLowdimRunner
 from source.common.checkpoint_util import TopKCheckpointManager
 from source.common.json_logger import JsonLogger
 from source.common.mean_flow_schedule import scheduled_flow_ratio
+from source.common.kinematic_mean_flow_schedule import set_kmf_progress
 from source.common.progressive_gap import (
     GapWeightingSchedule, gap_config, epoch_batch_sizes, capture_rng, restore_rng,
     isolated_rng, aggregate_diagnostics,
@@ -269,6 +270,10 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         # compute loss
+                        kmf_details = set_kmf_progress(
+                            self.model, self.ema_model, self.epoch, batch_idx,
+                            cfg.training.num_epochs, len(batch_sizes),
+                            cfg.training.get('flow_ratio_schedule'))
                         gap_details = {}
                         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=self.enable_amp):
                             if gap_schedule is None:
@@ -310,6 +315,8 @@ class TrainMeanFlowLowdimWorkspace(BaseWorkspace):
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
                         step_log.update(gap_details)
+                        step_log.update(kmf_details)
+                        step_log.update(getattr(self.model, 'kmf_diagnostics', {}))
 
                         is_last_batch = (batch_idx == len(batch_sizes) - 1)
                         if not is_last_batch:

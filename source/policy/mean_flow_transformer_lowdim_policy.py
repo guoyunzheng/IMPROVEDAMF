@@ -9,7 +9,10 @@ from source.policy.base_lowdim_policy import BaseLowdimPolicy
 from source.model.mean_flow.transformer_for_mean_flow import TransformerForMeanFlow
 from source.model.diffusion.mask_generator import LowdimMaskGenerator
 from functools import partial
-from source.common.kinematic_mean_flow import midpoint_target
+from source.common.kinematic_mean_flow import (
+    midpoint_target, configure_kmf, add_kmf_optimizer_group,
+    learnable_target, finish_kmf_loss,
+)
 
 def adaptive_l2_loss(error, gamma=0.5, c=1e-3):
     """
@@ -52,11 +55,11 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
             warm_start_t=0.5,
             refresh_every=None,
             mf_target_type="meanflow",
+            kmf_alpha=0.1,
+            kmf_gamma_max=0.5,
             # parameters passed to step
             **kwargs):
         super().__init__()
-        if mf_target_type not in ("meanflow", "kmf_midpoint"):
-            raise ValueError("mf_target_type must be meanflow or kmf_midpoint")
 
         # create diffusion model
         input_dim = action_dim
@@ -93,7 +96,7 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         self.n_obs_steps = n_obs_steps
         self.time_dist = time_dist
         self.flow_ratio = flow_ratio
-        self.mf_target_type = mf_target_type
+        configure_kmf(self, mf_target_type, kmf_alpha, kmf_gamma_max)
         self.flow_matching_inference = flow_matching_inference
         self.use_warm_start = use_warm_start
         self.warm_start_t = warm_start_t
@@ -282,6 +285,7 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         ) -> torch.optim.Optimizer:
         optim_groups = self.model.get_optim_groups(
             weight_decay=transformer_weight_decay)
+        add_kmf_optimizer_group(self, optim_groups)
         optimizer = torch.optim.AdamW(
             optim_groups, lr=learning_rate, betas=betas
         )
@@ -314,6 +318,8 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         #v_pred = self.model(z, t, t, cond=cond)
 
         model_partial = partial(self.model, cond=cond)
+        generator_loss = None
+        self.kmf_diagnostics = {}
         if self.flow_ratio == 1.0:
             # With r=t the target is v; no Mean Flow derivative is needed.
             u = model_partial(z, t, r)
@@ -321,6 +327,10 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
         elif getattr(self, 'mf_target_type', 'meanflow') == 'kmf_midpoint':
             u = model_partial(z, t, r)
             u_tgt = midpoint_target(self.model, nactions, e, t, r, cond)
+        elif getattr(self, 'mf_target_type', 'meanflow') == 'kmf_learnable':
+            gamma = self.kmf_gamma_max * (2 * self.kmf_generator.progress - 1)
+            u, u_tgt, generator_loss, self.kmf_diagnostics = learnable_target(
+                self.model, nactions, e, t, r, cond, self.kmf_generator, gamma)
         else:
             jvp_args = (
                 lambda z,t,r: model_partial(z, t, r),
@@ -333,4 +343,4 @@ class MeanFlowTransformerLowdimPolicy(BaseLowdimPolicy):
 
 
         loss = adaptive_l2_loss(error)
-        return loss
+        return finish_kmf_loss(self, loss, generator_loss)

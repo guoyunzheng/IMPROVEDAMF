@@ -145,6 +145,74 @@ class BatchTests(unittest.TestCase):
                         cfg, dict(task='reach', seed=42, output_dir=self.root))
                     self.assertIn('policy.mf_target_type=' + expected, command)
 
+    def test_learned_target_cli_reaches_named_batch_with_phase_and_gap_options(self):
+        output = self.root / 'learnable-dry-run'
+        path = self.config_file(output_root=str(output), tasks=['reach', 'push'], seeds=[42])
+        stream = io.StringIO()
+        with patch.object(batch.subprocess, 'Popen') as spawn, contextlib.redirect_stdout(stream):
+            self.assertEqual(batch.main([
+                '--config', str(path), '--mf-target-type', 'kmf_learnable',
+                '--kmf-alpha', '0.1', '--kmf-gamma-max', '0.5',
+                '--num-epochs', '500', '--mf-epochs', '300', '--flow-ratio', '0.5',
+                '--gap-weighting', 'progressive', '--gap-k', '1',
+                '--batch-name', 'KMFlearnable_20261116_seed42', '--dry-run',
+            ]), 0)
+        spawn.assert_not_called()
+        self.assertFalse(output.exists())
+        text = stream.getvalue()
+        self.assertIn('KMFlearnable_20261116_seed42', text)
+        self.assertIn('MF target: kmf_learnable', text)
+        self.assertIn('K-MF generator: alpha=0.1; gamma_max=0.5', text)
+        for override in ('policy.mf_target_type=kmf_learnable', 'policy.kmf_alpha=0.1',
+                         'policy.kmf_gamma_max=0.5', 'training.num_epochs=500',
+                         '++training.flow_ratio_schedule.fm_only_epochs=200', 'flow_ratio=0.5',
+                         'training.progressive_gap_weighting.enabled=true',
+                         'training.progressive_gap_weighting.k=1.0'):
+            self.assertEqual(text.count(override), 2)
+
+    def test_learned_target_json_and_cli_override_for_both_mean_flow_configs(self):
+        for config_name in sorted(batch.MEAN_FLOW_CONFIGS):
+            path = self.config_file(config_name=config_name, mf_target_type='kmf_learnable',
+                                    kmf_alpha=0.2, kmf_gamma_max=0.75)
+            for args, alpha, gamma in ((None, 0.2, 0.75),
+                                      (SimpleNamespace(kmf_alpha=0.1, kmf_gamma_max=0.5), 0.1, 0.5)):
+                with self.subTest(config_name=config_name, alpha=alpha, gamma=gamma):
+                    cfg = batch.load_config(path, args)
+                    command = batch.build_train_command(
+                        cfg, dict(task='reach', seed=42, output_dir=self.root))
+                    self.assertIn('policy.mf_target_type=kmf_learnable', command)
+                    self.assertIn(f'policy.kmf_alpha={alpha}', command)
+                    self.assertIn(f'policy.kmf_gamma_max={gamma}', command)
+
+    def test_learned_target_accepts_zero_alpha_and_gamma_boundaries(self):
+        for gamma in (0, 1):
+            cfg = batch.load_config(self.config_file(
+                mf_target_type='kmf_learnable', kmf_alpha=0, kmf_gamma_max=gamma))
+            command = batch.build_train_command(cfg, dict(task='reach', seed=42, output_dir=self.root))
+            self.assertIn('policy.kmf_alpha=0', command)
+            self.assertIn(f'policy.kmf_gamma_max={gamma}', command)
+
+    def test_invalid_learned_target_parameters_fail_before_launch(self):
+        for key in ('kmf_alpha', 'kmf_gamma_max'):
+            for value in (-0.1, float('nan'), float('inf'), True, None, '0.1', [], {}):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    batch.load_config(self.config_file(**{key: value}))
+            with self.subTest(key=key, config='flow_matching'), self.assertRaises(ValueError):
+                batch.load_config(self.config_file(
+                    config_name='train_flow_matching_transformer_lowdim_workspace', **{key: 0.1}))
+        with self.assertRaises(ValueError):
+            batch.load_config(self.config_file(kmf_gamma_max=1.01))
+
+    def test_invalid_learned_target_cli_exits_before_spawn(self):
+        for option, value in (('--kmf-alpha', '-1'), ('--kmf-alpha', 'nan'),
+                              ('--kmf-gamma-max', '1.01'), ('--kmf-gamma-max', 'inf')):
+            with self.subTest(option=option, value=value), \
+                    patch.object(batch.subprocess, 'Popen') as spawn, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                batch.main(['--mf-target-type', 'kmf_learnable', option, value, '--dry-run'])
+            self.assertEqual(raised.exception.code, 2)
+            spawn.assert_not_called()
+
     def test_invalid_target_settings_fail_before_launch(self):
         for changes in (dict(mf_target_type='unknown'), dict(mf_target_type=None),
                         dict(mf_target_type=True), dict(mf_target_type=1),
@@ -209,6 +277,7 @@ class BatchTests(unittest.TestCase):
                 command = batch.build_train_command(cfg, {"task": cfg["tasks"][0], "seed": 42, "output_dir": self.root})
                 self.assertFalse(any("flow_ratio" in part for part in command))
                 self.assertFalse(any(part.startswith('policy.mf_target_type=') for part in command))
+                self.assertFalse(any(part.startswith('policy.kmf_') for part in command))
 
     def test_separate_outputs_gpu_remapping_and_checkpoint_selection(self):
         cfg = {**self.cfg, "seeds": [0, 42]}

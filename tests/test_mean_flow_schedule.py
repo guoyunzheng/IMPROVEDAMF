@@ -11,7 +11,9 @@ import numpy as np
 import torch
 
 from source.common.mean_flow_schedule import scheduled_flow_ratio
-from source.common.kinematic_mean_flow import midpoint_target
+from source.common.kinematic_mean_flow import (
+    midpoint_target, configure_kmf, learnable_target, finish_kmf_loss,
+)
 
 
 SCHEDULE = {"enabled": True, "fm_only_fraction": 0.8}
@@ -94,6 +96,7 @@ def training_fixture(filename, flow_ratio, mf_target_type="meanflow"):
     namespace = {
         "np": np, "torch": torch, "partial": partial,
         "midpoint_target": midpoint_target,
+        "learnable_target": learnable_target, "finish_kmf_loss": finish_kmf_loss,
         # Both production rearrange patterns just append singleton dimensions.
         "rearrange": lambda tensor, pattern: tensor.reshape(tensor.shape[0], -1, 1),
     }
@@ -104,6 +107,7 @@ def training_fixture(filename, flow_ratio, mf_target_type="meanflow"):
         monotone_schedule_ratio=0.5, time_dist=["lognorm", -0.4, 1.0],
         normalizer=IdentityNormalizer(), model=TinyVelocity(),
     )
+    configure_kmf(policy, mf_target_type)
     policy.sample_t_r = MethodType(namespace["sample_t_r"], policy)
     policy.compute_loss = MethodType(namespace["compute_loss"], policy)
     policy.model_call = lambda z, t, r, cond: policy.model(z, t, r, cond=cond)

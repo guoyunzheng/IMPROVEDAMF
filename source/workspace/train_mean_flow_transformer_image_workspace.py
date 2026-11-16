@@ -19,6 +19,8 @@ from source.env_runner.base_image_runner import BaseImageRunner
 from source.common.checkpoint_util import TopKCheckpointManager
 from source.common.json_logger import JsonLogger
 from source.common.mean_flow_schedule import scheduled_flow_ratio
+from source.common.kinematic_mean_flow_schedule import set_kmf_progress
+from source.common.progressive_gap import capture_rng, epoch_batch_sizes, restore_rng
 from source.common.pytorch_util import dict_apply, optimizer_to
 from source.model.diffusion.ema_model import EMAModel
 from source.model.common.lr_scheduler import get_scheduler
@@ -27,7 +29,7 @@ from source.model.common.normalizer import SingleFieldLinearNormalizer
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
-    include_keys = ['global_step', 'epoch']
+    include_keys = ['global_step', 'epoch', 'kmf_resume_state']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
@@ -48,13 +50,28 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
             self.ema_model = copy.deepcopy(self.model)
 
         # configure training state
-        self.enable_amp = True
+        self.enable_amp = str(cfg.training.device).startswith('cuda') and torch.cuda.is_available()
         self.optimizer = self.model.get_optimizer(**cfg.optimizer)
-        self.scaler = torch.amp.GradScaler("cuda:0", enabled=self.enable_amp)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.enable_amp)
 
         # configure training state
         self.global_step = 0
         self.epoch = 0
+        self.kmf_resume_state = None
+
+    def load_payload(self, payload, exclude_keys=None, include_keys=None, **kwargs):
+        if include_keys is not None:
+            include_keys = list(dict.fromkeys([*include_keys, 'kmf_resume_state']))
+        super().load_payload(payload, exclude_keys, include_keys, **kwargs)
+        if self.kmf_resume_state is not None:
+            self.epoch = self.kmf_resume_state['next_epoch']
+            self.global_step = self.kmf_resume_state['next_global_step']
+
+    def record_kmf_resume_state(self, lr_scheduler):
+        if getattr(self.model, 'mf_target_type', 'meanflow') == 'kmf_learnable':
+            self.kmf_resume_state = dict(
+                next_epoch=self.epoch + 1, next_global_step=self.global_step + 1,
+                rng=capture_rng(), lr_scheduler=lr_scheduler.state_dict())
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -103,6 +120,10 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
             # however huggingface diffusers steps it every batch
             last_epoch=self.global_step-1
         )
+        if self.kmf_resume_state is not None:
+            lr_scheduler.load_state_dict(self.kmf_resume_state['lr_scheduler'])
+            for group, lr in zip(self.optimizer.param_groups, lr_scheduler.get_last_lr()):
+                group['lr'] = lr
 
         # configure ema
         ema: EMAModel = None
@@ -110,6 +131,8 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
             ema = hydra.utils.instantiate(
                 cfg.ema,
                 model=self.ema_model)
+            if getattr(self.model, 'mf_target_type', 'meanflow') == 'kmf_learnable':
+                ema.optimization_step = self.global_step
 
         # configure env
         env_runner: BaseImageRunner
@@ -148,6 +171,10 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2
+            if getattr(self.model, 'mf_target_type', 'meanflow') == 'kmf_learnable':
+                flow_schedule = cfg.training.get('flow_ratio_schedule')
+                if flow_schedule is not None and flow_schedule.get('fm_only_epochs') is not None:
+                    flow_schedule.fm_only_epochs = min(flow_schedule.fm_only_epochs, cfg.training.num_epochs)
             cfg.training.max_train_steps = 3
             cfg.training.max_val_steps = 3
             cfg.training.rollout_every = 1
@@ -155,9 +182,21 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
 
+        batch_sizes = epoch_batch_sizes(len(dataset), cfg.dataloader.batch_size,
+                                       cfg.dataloader.get('drop_last', False),
+                                       cfg.training.max_train_steps)
+        # Older image checkpoints count the full loader. Learned KMF checkpoints
+        # record the actual capped batches so resuming keeps the gamma schedule.
+        last_training_batch = len(train_dataloader) - 1
+        if getattr(self.model, 'mf_target_type', 'meanflow') == 'kmf_learnable':
+            last_training_batch = len(batch_sizes) - 1
+
         # JVP computation is not supported by flash attention or efficient attention kernels
         torch.backends.cuda.enable_flash_sdp(False)
         torch.backends.cuda.enable_mem_efficient_sdp(False)
+
+        if self.kmf_resume_state is not None:
+            restore_rng(self.kmf_resume_state['rng'])
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -182,7 +221,11 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         # compute loss
-                        with torch.autocast(device_type='cuda:0',dtype=torch.float16, enabled=self.enable_amp):
+                        kmf_details = set_kmf_progress(
+                            self.model, self.ema_model, self.epoch, batch_idx,
+                            cfg.training.num_epochs, len(batch_sizes),
+                            cfg.training.get('flow_ratio_schedule'))
+                        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=self.enable_amp):
                             raw_loss = self.model.compute_loss(batch)
                             loss = raw_loss / cfg.training.gradient_accumulate_every
 
@@ -211,8 +254,10 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
                             'mf_ratio': 1.0 - flow_ratio,
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
+                        step_log.update(kmf_details)
+                        step_log.update(getattr(self.model, 'kmf_diagnostics', {}))
 
-                        is_last_batch = (batch_idx == (len(train_dataloader)-1))
+                        is_last_batch = (batch_idx == last_training_batch)
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
                             wandb_run.log(step_log, step=self.global_step)
@@ -294,6 +339,7 @@ class TrainMeanFlowTransformerImageWorkspace(BaseWorkspace):
                         del mse
 
                 # checkpoint
+                self.record_kmf_resume_state(lr_scheduler)
                 if ((self.epoch % cfg.training.checkpoint_every) == 0) and rollout_this_epoch:
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:

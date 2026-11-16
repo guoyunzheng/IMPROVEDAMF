@@ -26,6 +26,8 @@ import tqdm
 from source.common.checkpoint_util import TopKCheckpointManager
 from source.common.json_logger import JsonLogger
 from source.common.mean_flow_schedule import scheduled_flow_ratio
+from source.common.kinematic_mean_flow import configure_kmf
+from source.common.kinematic_mean_flow_schedule import set_kmf_progress
 from source.common.progressive_gap import (
     GapWeightingSchedule, aggregate_diagnostics, capture_rng, epoch_batch_sizes,
     gap_config, gap_loss, isolated_rng, restore_rng,
@@ -75,7 +77,7 @@ class Policy(torch.nn.Module):
         super().__init__()
         self.horizon, self.n_obs_steps = 6, 2
         self.flow_ratio = flow_ratio
-        self.mf_target_type = mf_target_type
+        configure_kmf(self, mf_target_type)
         self.monotone_schedule_ratio = .5
         self.time_dist = ['lognorm', -.4, 1.]
         self.normalizer = Normalizer()
@@ -122,9 +124,19 @@ class Runner:
         return {'test/mean_score': 0.}
 
 
+class ImagePolicy(Policy):
+    def process_obs(self, obs):
+        return obs[:, :self.n_obs_steps].reshape(-1, obs.shape[-1])
+
+    def predict_action(self, obs):
+        return {'action_pred': torch.zeros(obs.shape[0], 6, 2, device=obs.device)}
+
+
 def instantiate(cfg, **kwargs):
     if cfg.kind == 'policy':
         return Policy(cfg.flow_ratio, cfg.get('mf_target_type', 'meanflow'))
+    if cfg.kind == 'image_policy':
+        return ImagePolicy(cfg.flow_ratio, cfg.get('mf_target_type', 'meanflow'))
     if cfg.kind == 'dataset':
         return Dataset()
     if cfg.kind == 'runner':
@@ -138,25 +150,31 @@ def scheduler(name, optimizer, last_epoch, **kwargs):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: .98 ** step, last_epoch=last_epoch)
 
 
-def workspace_class():
+def workspace_class(image=False):
     # Like the existing tests, load real definitions without importing optional
     # packages. No training-loop, progress, checkpoint or loss logic is copied.
     namespace = dict(globals(), __name__=__name__, OmegaConf=OmegaAdapter,
                      hydra=SimpleNamespace(utils=SimpleNamespace(instantiate=instantiate)),
                      BaseLowdimDataset=Dataset, BaseLowdimRunner=Runner,
+                     BaseImageDataset=Dataset, BaseImageRunner=Runner,
                      MeanFlowTransformerLowdimPolicy=Policy,
                      AdaptiveMeanFlowTransformerLowdimPolicy=Policy,
+                     MeanFlowTransformerImagePolicy=ImagePolicy,
+                     AdaptiveMeanFlowTransformerImagePolicy=ImagePolicy,
                      SingleFieldLinearNormalizer=SimpleNamespace(create_fit=lambda **kwargs: None),
                      DataLoader=torch.utils.data.DataLoader, get_scheduler=scheduler,
                      wandb=SimpleNamespace(init=lambda **kwargs: SimpleNamespace(log=lambda *a, **kw: None),
                                            config=SimpleNamespace(update=lambda *a, **kw: None)))
-    for filename in ('base_workspace.py', 'train_mean_flow_lowdim_workspace.py'):
+    workspace_file = ('train_mean_flow_transformer_image_workspace.py' if image
+                      else 'train_mean_flow_lowdim_workspace.py')
+    for filename in ('base_workspace.py', workspace_file):
         path = ROOT / 'source/workspace' / filename
         tree = ast.parse(path.read_text(encoding='utf-8'))
         nodes = [n for n in tree.body if isinstance(n, (ast.ClassDef, ast.FunctionDef))
                  and getattr(n, 'name', '') != 'main']
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), namespace)
-    return namespace['TrainMeanFlowLowdimWorkspace']
+    class_name = 'TrainMeanFlowTransformerImageWorkspace' if image else 'TrainMeanFlowLowdimWorkspace'
+    return namespace[class_name]
 
 
 class StopAfterCheckpoint(Exception):
@@ -214,8 +232,18 @@ class WorkspaceSmokeTests(unittest.TestCase):
         self.cfg.policy.mf_target_type = 'kmf_midpoint'
         self.check_train_and_resume()
 
+    def test_learnable_train_validate_save_resume_preserves_generator_and_gamma(self):
+        self.cfg.policy.mf_target_type = 'kmf_learnable'
+        self.check_train_and_resume()
+
     def check_train_and_resume(self):
         full = self.make_workspace(self.root / 'continuous')
+        initial_generator = None
+        if self.cfg.policy.get('mf_target_type') == 'kmf_learnable':
+            initial_generator = [value.detach().clone() for value in full.model.kmf_generator.parameters()]
+            probe_t, probe_r = torch.tensor([.8, .6, .4]), torch.tensor([.1, .2, .3])
+            with torch.no_grad():
+                initial_split = full.model.kmf_generator(probe_t, probe_r).clone()
         full.run()
         interrupted = self.make_workspace(self.root / 'resumed', stop_epoch=1)
         with self.assertRaises(StopAfterCheckpoint):
@@ -245,16 +273,76 @@ class WorkspaceSmokeTests(unittest.TestCase):
         self.assertIn('val_fm_mse', final)
         self.assertIn('val_mf_mse', final)
         self.assertEqual(sum(final.get(f'val_mf_gap_bin_{i}_count', 0) for i in range(4)), 5)
+        if self.cfg.policy.get('mf_target_type') == 'kmf_learnable':
+            self.assertTrue(any(not torch.equal(initial, trained) for initial, trained in
+                                zip(initial_generator, full.model.kmf_generator.parameters())))
+            with torch.no_grad():
+                trained_split = full.model.kmf_generator(probe_t, probe_r)
+            self.assertFalse(torch.equal(initial_split, trained_split))
+            for row, expected_gamma in zip(joint, [-.5, -.3, -.1, .1, .3, .5]):
+                self.assertAlmostEqual(row['kmf_gamma'], expected_gamma, places=6)
+            self.assertEqual(full.model.kmf_generator.progress.item(), 1.)
+            self.assertEqual(resumed.ema_model.kmf_generator.progress.item(), 1.)
+            self.assertIn('kmf_generator_loss', final)
+
+    def test_learnable_validation_reads_progress_and_warmup_keeps_generator_fixed(self):
+        self.cfg.policy.mf_target_type = 'kmf_learnable'
+        self.cfg.training.num_epochs = 2
+        workspace = self.make_workspace(self.root / 'warmup', stop_epoch=0)
+        initial = {key: value.clone() for key, value in workspace.model.kmf_generator.state_dict().items()}
+        with self.assertRaises(StopAfterCheckpoint):
+            workspace.run()
+        for key, value in initial.items():
+            torch.testing.assert_close(workspace.model.kmf_generator.state_dict()[key], value, rtol=0, atol=0)
+        workspace.model.flow_ratio = .2
+        set_kmf_progress(workspace.model, workspace.ema_model, 1, 1, 2, 2, dict(fm_only_epochs=1))
+        progress = workspace.model.kmf_generator.progress.clone()
+        batch = next(iter(torch.utils.data.DataLoader(Dataset(), batch_size=5)))
+        with torch.no_grad():
+            workspace.model.compute_loss(batch)
+            workspace.model.compute_loss(batch)
+        torch.testing.assert_close(workspace.model.kmf_generator.progress, progress, rtol=0, atol=0)
+        torch.testing.assert_close(workspace.ema_model.kmf_generator.progress, progress, rtol=0, atol=0)
+
+    def test_learnable_image_resume_uses_next_epoch_and_matching_gamma(self):
+        self.Workspace = workspace_class(image=True)
+        self.cfg.policy.kind = 'image_policy'
+        self.cfg.policy.mf_target_type = 'kmf_learnable'
+        self.cfg.training.progressive_gap_weighting.enabled = False
+        self.cfg.freeze_obs_encoder = False
+        full = self.make_workspace(self.root / 'image-continuous')
+        full.run()
+        interrupted = self.make_workspace(self.root / 'image-resumed', stop_epoch=1)
+        with self.assertRaises(StopAfterCheckpoint):
+            interrupted.run()
+        resumed = self.make_workspace(self.root / 'image-resumed')
+        resumed.run()
+        self.assertEqual(resumed.epoch, 4)
+        self.assertEqual(resumed.global_step, 8)
+        for key, expected in full.model.state_dict().items():
+            torch.testing.assert_close(resumed.model.state_dict()[key], expected, rtol=0, atol=0)
+        for key, expected in full.ema_model.state_dict().items():
+            torch.testing.assert_close(resumed.ema_model.state_dict()[key], expected, rtol=0, atol=0)
+        self.assertEqual(resumed.ema_model.kmf_generator.progress.item(), 1.)
+        rows = [json.loads(line) for line in (self.root / 'image-resumed/logs.json.txt').read_text().splitlines()]
+        self.assertEqual([row['epoch'] for row in rows], [0, 0, 1, 2, 2, 3, 3])
+        self.assertAlmostEqual(rows[-1]['kmf_gamma'], .5)
 
     def test_debug_limits_used_before_planning_and_zero_joint_is_safe(self):
         self.cfg.training.debug = True
         self.cfg.training.flow_ratio_schedule = config(dict(fm_only_epochs=400))
-        workspace = self.make_workspace(self.root / 'debug')
-        workspace.run()
-        self.assertEqual(workspace.epoch, 2)
-        self.assertEqual(workspace.global_step, 6)
-        self.assertEqual(workspace.progressive_gap_state['planned_joint_batches'], 0)
-        self.assertIsNone(workspace.progressive_gap_state['lambda_value'])
+        for mode in ('meanflow', 'kmf_learnable'):
+            with self.subTest(mode=mode):
+                self.cfg.policy.mf_target_type = mode
+                workspace = self.make_workspace(self.root / mode)
+                workspace.run()
+                self.assertEqual(workspace.epoch, 2)
+                self.assertEqual(workspace.global_step, 6)
+                self.assertEqual(workspace.progressive_gap_state['planned_joint_batches'], 0)
+                self.assertIsNone(workspace.progressive_gap_state['lambda_value'])
+                if mode == 'kmf_learnable':
+                    self.assertEqual(workspace.model.kmf_generator.progress.item(), 0.)
+                    self.assertEqual(workspace.ema_model.kmf_generator.progress.item(), 0.)
 
     @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required for real AMP smoke')
     def test_cuda_amp_short_training_has_finite_loss_and_parameters(self):
